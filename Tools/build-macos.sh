@@ -772,10 +772,10 @@ build_d3d_umd() {
     done < <(umd_inputs "${out}" i686)
     rm -f "${out}/${UMD_DLL}" "${out}/${UMD_DLL_X86}"
     "${mingw}/arm64ec-w64-mingw32-clang++" -marm64x -shared -g -o "${out}/${UMD_DLL}" "${UMD_DIR}/viogpu3d_umd.def" \
-        "${out}/aarch64/obj/viogpu3d_umd.res.o" "${inputs[@]}" -static -ldxguid -lgdi32 -lversion \
+        "${out}/aarch64/obj/viogpu3d_umd.res.o" "${inputs[@]}" -static -ldxguid -lversion \
         "-Wl,--pdb=${out}/viogpu3d_umd.pdb"
     "${mingw}/i686-w64-mingw32-clang++" -shared -g -o "${out}/${UMD_DLL_X86}" "${UMD_DIR}/viogpu3d_umd.def" \
-        "${out}/i686/obj/viogpu3d_umd.res.o" "${inputs_x86[@]}" -static -ldxguid -lgdi32 -lversion \
+        "${out}/i686/obj/viogpu3d_umd.res.o" "${inputs_x86[@]}" -static -ldxguid -lversion \
         "-Wl,--pdb=${out}/viogpu3d_umd_x86.pdb"
     note "built ${out#"${REPO}"/}/${UMD_DLL} (ARM64X) and ${UMD_DLL_X86}, version ${STAMPINF_VERSION}"
 }

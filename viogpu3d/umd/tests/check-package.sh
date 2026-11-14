@@ -11,7 +11,7 @@
 #   vulkan_virtio_x86.dll are x86;
 # - each view of each Direct3D driver exports OpenAdapter10_2 only, by that name (undecorated on x86, where the
 #   function is stdcall), and each view of each Vulkan driver the loader's three vk_icd entry points;
-# - every view imports system DLLs only;
+# - every view imports system DLLs only, and no view of a Direct3D driver imports a D3DKMT function;
 # - the file version of all four DLLs is the INF's DriverVer version;
 # - the notices file carries the full licence of Triton, of DXVK and of each of DXVK's subprojects, as this tree has
 #   them, the licences llvm-mingw ships for its runtime, as MINGW_DIR has them, and a Mesa part naming MIT, with
@@ -186,7 +186,8 @@ EOF
     done
 fi
 
-# Per view: "<view> format <f>", "<view> export <name>", "<view> import <dll>"; view is native or arm64ec.
+# Per view: "<view> format <f>", "<view> export <name>", "<view> import <dll>", "<view> symbol <imported function>";
+# view is native or arm64ec.
 views() {
     "$LLVM_READOBJ" --coff-exports --coff-imports "$1" | python3 -I -c '
 import re
@@ -200,11 +201,12 @@ for line in sys.stdin:
         view = "arm64ec"
     elif text.startswith("Format:"):
         print(view, "format", text.split()[1])
-    elif text in ("Export {", "Import {"):
-        block = text.split()[0].lower()
+    elif text in ("Export {", "Import {", "DelayImport {"):
+        block = "export" if text == "Export {" else "import"
     elif text.startswith("Name:") and block:
         print(view, block, text.split(None, 1)[1])
-        block = None if block == "import" else block
+    elif text.startswith("Symbol:") and block == "import":
+        print(view, "symbol", text.split()[1])
     elif text == "}":
         block = None
 '
@@ -253,6 +255,13 @@ check_dll $UMD arm64x OpenAdapter10_2
 check_dll $UMD_X86 i386 OpenAdapter10_2
 check_dll $ICD arm64x vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr vk_icdNegotiateLoaderICDInterfaceVersion
 check_dll $ICD_X86 i386 vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr vk_icdNegotiateLoaderICDInterfaceVersion
+
+# DXVK's GDI interop, keyed mutexes and NT handle sharing are built out of the Direct3D drivers.
+for dll in $UMD $UMD_X86; do
+    [ -f "$PACK/$dll" ] || continue
+    kmt=$(views "$PACK/$dll" | awk '$2 == "symbol" && $3 ~ /^D3DKMT/ { print $1 ":" $3 }' | sort -u)
+    [ -z "$kmt" ] && pass "$dll imports no D3DKMT function" || fail "$dll imports $(echo $kmt)"
+done
 
 driverver=$(printf '%s\n' "$inf" | awk -F'[=,]' 'tolower($1) ~ /^[ \t]*driverver[ \t]*$/ { v = $3; gsub(/[ \t]/, "", v); print v; exit }')
 for dll in $UMD $UMD_X86 $ICD $ICD_X86; do
