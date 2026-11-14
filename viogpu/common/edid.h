@@ -175,13 +175,16 @@ typedef struct _EDID_DATA_V1
     UCHAR Checksum[1];
 } EDID_DATA_V1, *PEDID_DATA_V1;
 
+#define CTA_861_EXTENSION_TAG 0x02
+#define CTA_VIDEO_DATA_BLOCK  0x02
+
 typedef struct _EDID_CTA_861
 {
     UCHAR ExtentionTag[1];
     UCHAR Revision[1];
     UCHAR DTDBegin[1];
     UCHAR DTDsNumber[1];
-    UCHAR Data[122];
+    UCHAR Data[123];
     UCHAR Checksum[1];
 } EDID_CTA_861, *PEDID_CTA_861;
 
@@ -202,7 +205,8 @@ typedef enum _IMG_ASPECT_RATIO
 } IMG_ASPECT_RATIO;
 
 bool GetStandardTimingResolution(PSTANDARD_TIMING_DESCRIPTOR desc, PVIOGPU_DISP_MODE mode);
-bool GetVICResolution(USHORT idx, PVIOGPU_DISP_MODE mode);
+bool GetVICResolution(UCHAR svd, PVIOGPU_DISP_MODE mode);
+bool GetDetailedTimingResolution(PEDID_DETAILED_DESCRIPTOR desc, PVIOGPU_DISP_MODE mode);
 
 extern VIOGPU_DISP_MODE gpu_disp_modes[64];
 extern UCHAR g_gpu_edid[EDID_V1_BLOCK_SIZE];

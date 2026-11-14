@@ -2527,19 +2527,32 @@ PBYTE VioGpuAdapter::GetCTA861Data(void)
 {
     PAGED_CODE();
 
-    if (m_bEDID)
+    if (!m_bEDID)
     {
-        PEDID_DATA_V1 edid_data = (PEDID_DATA_V1)m_EDIDs;
-        if (edid_data->ExtensionFlag[0])
-        {
-            PEDID_CTA_861 cta_data = (PEDID_CTA_861)(m_EDIDs + EDID_V1_BLOCK_SIZE);
-            if (cta_data->ExtentionTag[0] >= 2 && cta_data->Revision[0] >= 3)
-            {
-                return (PBYTE)cta_data;
-            }
-        }
+        return NULL;
     }
-    return NULL;
+    PEDID_DATA_V1 edid_data = (PEDID_DATA_V1)m_EDIDs;
+    if (edid_data->ExtensionFlag[0] == 0)
+    {
+        return NULL;
+    }
+    PBYTE block = m_EDIDs + EDID_V1_BLOCK_SIZE;
+    PEDID_CTA_861 cta_data = (PEDID_CTA_861)block;
+    UCHAR sum = 0;
+    for (ULONG i = 0; i < EDID_V1_BLOCK_SIZE; i++)
+    {
+        sum += block[i];
+    }
+    // The first extension, when it is a CTA-861 one (tag 02h) of version 3, whose offset d of its detailed timings is
+    // 0 or lies inside the block, and whose checksum holds (CTA-861-G, 7.5). Other extensions, such as DisplayID
+    // (70h) or a block map (F0h), have other layouts.
+    UCHAR dtd_begin = cta_data->DTDBegin[0];
+    if (cta_data->ExtentionTag[0] != CTA_861_EXTENSION_TAG || cta_data->Revision[0] < 3 ||
+        (dtd_begin != 0 && (dtd_begin < 4 || dtd_begin >= EDID_V1_BLOCK_SIZE)) || sum != 0)
+    {
+        return NULL;
+    }
+    return block;
 }
 
 VOID VioGpuAdapter::CreateResolutionEvent(VOID)
@@ -3292,7 +3305,7 @@ BOOLEAN VioGpuAdapter::UpdateModes(USHORT xres, USHORT yres, int &cnt)
     int idx = 0;
 
     DbgPrint(TRACE_LEVEL_INFORMATION, (" x_res: %d, y_res: %d\n", xres, yres));
-    if ((xres < MIN_WIDTH_SIZE) || (yres < MIN_HEIGHT_SIZE))
+    if ((xres < MIN_WIDTH_SIZE) || (yres < MIN_HEIGHT_SIZE) || (cnt >= (int)ARRAYSIZE(gpu_disp_modes)))
     {
         return FALSE;
     }
@@ -3373,6 +3386,16 @@ int VioGpuAdapter::AddEdidModes(void)
     }
 
     DbgPrint(TRACE_LEVEL_INFORMATION, (" Processing EDID's detailed timings (4 18-byte blocks)\n"));
+    PEDID_DETAILED_DESCRIPTOR detailed_timing = edid_data->EDIDDetailedTimings;
+    for (int i = 0; i < 4; i++, detailed_timing++)
+    {
+        VIOGPU_DISP_MODE mode{0};
+        if (GetDetailedTimingResolution(detailed_timing, &mode))
+        {
+            UpdateModes(mode.XResolution, mode.YResolution, modecount);
+        }
+    }
+
     if (edid_data->Revision[0] == 4)
     {
         PEDID_DETAILED_DESCRIPTOR detailed_desc = edid_data->EDIDDetailedTimings;
@@ -3496,18 +3519,42 @@ int VioGpuAdapter::AddEdidModes(void)
     }
 
     DbgPrint(TRACE_LEVEL_INFORMATION, (" Processing CTA861 data\n"));
-    PEDID_CTA_861 cta_data = (PEDID_CTA_861)GetCTA861Data();
-    if (cta_data && cta_data->DTDBegin[0] > 4)
+    PBYTE cta_data = GetCTA861Data();
+    if (cta_data)
     {
-        int vics = (cta_data->DTDBegin[0] - 1) - 4;
-        for (int idx = 0; idx < vics; idx++)
+        ULONG dtd_begin = cta_data[FIELD_OFFSET(EDID_CTA_861, DTDBegin)];
+        // The data block collection runs from byte 4 to d - 1; each block starts with its tag in bits 7 to 5 and its
+        // length in bits 4 to 0. Only a video data block holds short video descriptors (CTA-861-G, 7.5).
+        ULONG offset = FIELD_OFFSET(EDID_CTA_861, Data);
+        while (offset < dtd_begin)
+        {
+            UCHAR tag = (UCHAR)(cta_data[offset] >> 5);
+            ULONG length = cta_data[offset] & 0x1F;
+            if (offset + 1 + length > dtd_begin)
+            {
+                break;
+            }
+            for (ULONG idx = 1; tag == CTA_VIDEO_DATA_BLOCK && idx <= length; idx++)
+            {
+                VIOGPU_DISP_MODE mode{0};
+                if (GetVICResolution(cta_data[offset + idx], &mode))
+                {
+                    UpdateModes(mode.XResolution, mode.YResolution, modecount);
+                }
+            }
+            offset += 1 + length;
+        }
+
+        // Detailed timings follow from d up to the checksum, and end at the first pixel clock of 0.
+        for (offset = dtd_begin; dtd_begin != 0 && offset + sizeof(EDID_DETAILED_DESCRIPTOR) < EDID_V1_BLOCK_SIZE;
+             offset += sizeof(EDID_DETAILED_DESCRIPTOR))
         {
             VIOGPU_DISP_MODE mode{0};
-            USHORT vic_num = cta_data->Data[idx];
-            if (GetVICResolution(vic_num, &mode))
+            if (!GetDetailedTimingResolution((PEDID_DETAILED_DESCRIPTOR)(cta_data + offset), &mode))
             {
-                UpdateModes(mode.XResolution, mode.YResolution, modecount);
+                break;
             }
+            UpdateModes(mode.XResolution, mode.YResolution, modecount);
         }
     }
 
