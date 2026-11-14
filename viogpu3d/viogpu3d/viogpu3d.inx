@@ -27,6 +27,8 @@ DefaultDestDir = INX_PLATFORM_DRIVERS_DIR
 
 [SourceDisksFiles]
 viogpu3d.sys = 1,,
+viogpu3d_umd.dll = 1,,
+viogpu3d_umd_notices.txt = 1,,
 vulkan_virtio.dll = 1,,
 vulkan_virtio.json = 1,,
 
@@ -43,6 +45,11 @@ vulkan_virtio.json = 1,,
 [VioGpu3d_Files_Driver]
 viogpu3d.sys,,,2
 
+; The Direct3D 10 and 11 driver, on DXVK and Mesa's Venus Vulkan driver, and the licences of the code in it.
+[VioGpu3d_Files_UserMode]
+viogpu3d_umd.dll,,,2
+viogpu3d_umd_notices.txt,,,2
+
 ; Mesa's Venus Vulkan driver and its manifest.
 [VioGpu3d_Files_Vulkan]
 vulkan_virtio.dll,,,2
@@ -51,7 +58,7 @@ vulkan_virtio.json,,,2
 [VioGpu3d_Inst]
 Include=msdv.inf
 FeatureScore=F9
-CopyFiles=VioGpu3d_Files_Driver,VioGpu3d_Files_Vulkan
+CopyFiles=VioGpu3d_Files_Driver,VioGpu3d_Files_UserMode,VioGpu3d_Files_Vulkan
 AddReg=VioGpu3d_DeviceSettings
 
 
@@ -75,10 +82,15 @@ AddReg = VioGpu3d_EventLog_Inst.AddReg
 HKR,,EventMessageFile,%REG_EXPAND_SZ%,"%%SystemRoot%%\System32\IoLogMsg.dll"
 HKR,,TypesSupported,%REG_DWORD%,7
 
-; The Vulkan loader reads VulkanDriverName in the adapter's software key: the full path of the ICD's manifest. No
-; VulkanDriverNameWow, as there is no 32-bit ICD. A D3D UMD for UserModeDriverName joins once one is built.
+; The D3D runtimes read UserModeDriverName in the order D3D9, D3D10, D3D11, D3D12; the one driver fills every slot.
+; The runtime looks for that bare name in the driver store, where the Win11 package installs it (DIRID 13). The Win10
+; package installs it in System32\drivers (DIRID 12), where the runtime does not look: the Direct3D driver works in
+; the Win11 package only. Its file version is DriverVer's. No UserModeDriverNameWow: there is no 32-bit driver. The
+; Vulkan loader reads VulkanDriverName in the adapter's software key: the full path of the ICD's manifest. No
+; VulkanDriverNameWow, as there is no 32-bit ICD.
 [VioGpu3d_DeviceSettings]
 HKR,, FlexResolution,              %REG_DWORD%, 1
+HKR,, UserModeDriverName,          %REG_MULTI_SZ%, viogpu3d_umd.dll, viogpu3d_umd.dll, viogpu3d_umd.dll, viogpu3d_umd.dll
 HKR,, VulkanDriverName,            %REG_MULTI_SZ%, %INX_PLATFORM_DRIVERS_DIR%\vulkan_virtio.json
 
 [VioGpu3d_PCI_MSIX]
