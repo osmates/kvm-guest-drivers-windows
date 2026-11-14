@@ -6,8 +6,8 @@
  *
  * The DDI caps the runtime asks for at OpenAdapter time are answered
  * from the host backend's own CheckFeatureSupport, taken once per
- * adapter on an inner Neptune device that the first CreateDevice then
- * adopts.  Every field the handlers report goes through one of three
+ * adapter on an inner device (triton_backend.h, triton12_backend.h) that
+ * the first CreateDevice adopts when the backend allows it.  Every field the handlers report goes through one of three
  * policies, which is the only hand-maintained part:
  *
  *   HOST   the host's answer, forwarded (the default);
@@ -54,6 +54,7 @@ enum {
     TRITON_HC12_OPTIONS9     = 1u << 11,
     TRITON_HC12_OPTIONS11    = 1u << 12,
     TRITON_HC12_QUEUE_PRIORITY = 1u << 13,
+    TRITON_HC12_FEATURE_LEVELS = 1u << 14,
 };
 
 /* Feature ids past the SDK the driver is built against are still asked
@@ -96,14 +97,23 @@ struct triton_host_caps12 {
     /* COMMAND_QUEUE_PRIORITY at GLOBAL_REALTIME, one D3D12DDI_COMMAND_QUEUE_FLAG
      * bit per queue type the host accepts (3D, COMPUTE, COPY). */
     UINT                                        globalRealtimeQueueFlags;
+    /* FEATURE_LEVELS: the highest level the host device takes. */
+    D3D_FEATURE_LEVEL                           maxFeatureLevel;
 };
 
-/* Stand up an inner Neptune ID3D12Device and fill \p out from it.  On
- * success *ppDev holds the device for the caller to adopt or release.
+/* Stand up an inner ID3D12Device (triton12_backend_create_caps_device)
+ * and fill \p out from it.  On success *ppDev holds the device for the
+ * caller to adopt or release, and *pAdoptable is the backend's answer.
  * Returns FALSE (out->probed == FALSE) when the host device cannot be
  * created; the handlers then report zero fill. */
+struct TRITON12_ADAPTER;
 BOOL tritonHostCaps12Snapshot(struct triton_host_caps12 *out,
-                              ID3D12Device **ppDev);
+                              struct TRITON12_ADAPTER *pAdapter,
+                              ID3D12Device **ppDev, BOOL *pAdoptable);
+
+/* The D3D12DDI_3DPIPELINELEVEL of the host device's highest feature
+ * level, 11_0 when FEATURE_LEVELS went unanswered. */
+UINT tritonHostCaps12PipelineLevel(const struct triton_host_caps12 *hc);
 
 /* ---------- D3D11 ---------- */
 

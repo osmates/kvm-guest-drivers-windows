@@ -16,7 +16,9 @@ extern "C" {
 
 void triton_backend_log(const char *line);
 
-#define TRITON_DEBUG_PRESENT_TIMING (1u << 0)
+#define TRITON_DEBUG_PRESENT_TIMING        (1u << 0)
+#define TRITON_DEBUG_D3D12_LIST_MIGRATION  (1u << 1)
+#define TRITON_DEBUG_NO_D3D12_XQUEUE_ORDER (1u << 2)
 
 BOOL triton_backend_debug(UINT flag);
 int triton_backend_present_gate_trace_ms(void);
@@ -35,6 +37,8 @@ UINT triton_backend_workaround_flags(void);
 #define TRITON_HOSTCAP_MAP_DEFAULT_BUFFERS       (1u << 4)
 #define TRITON_HOSTCAP_SHADER_CACHE              (1u << 5)
 #define TRITON_HOSTCAP_DXIL                      (1u << 6)
+// The D3D12 pipeline level is the inner device's own highest feature level, with no label-only claims.
+#define TRITON_HOSTCAP_HOST_FEATURE_LEVEL        (1u << 7)
 
 struct triton_adapter_probe {
    BOOL viogpu;

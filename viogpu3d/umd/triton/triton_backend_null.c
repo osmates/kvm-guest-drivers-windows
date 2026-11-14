@@ -5,7 +5,7 @@
 
 // A backend that makes nothing: Triton with it links into a driver whose adapter offers no device.
 
-#include "triton.h"
+#include "triton12.h"
 
 void triton_backend_log(const char *line)
 {
@@ -113,4 +113,106 @@ void triton_backend_destroy_resource(PTRITON_DEVICE pD, PTRITON_RESOURCE r)
 HRESULT APIENTRY OpenAdapter10_2(D3D10DDIARG_OPENADAPTER *pOpenData)
 {
     return tritonOpenAdapter10_2(pOpenData, NULL);
+}
+
+UINT triton12_backend_host_caps(struct TRITON12_ADAPTER *pAdapter)
+{
+    (void)pAdapter;
+    return 0;
+}
+
+void triton12_backend_close_adapter(struct TRITON12_ADAPTER *pAdapter)
+{
+    (void)pAdapter;
+}
+
+HRESULT triton12_backend_create_caps_device(struct TRITON12_ADAPTER *pAdapter, ID3D12Device **ppDevice,
+                                            BOOL *pAdoptable)
+{
+    (void)pAdapter;
+    *ppDevice = NULL;
+    *pAdoptable = FALSE;
+    return E_NOTIMPL;
+}
+
+HRESULT triton12_backend_create_device(struct TRITON12_DEVICE *p, const D3D12DDIARG_CREATEDEVICE_0003 *pArgs,
+                                       ID3D12Device **ppDevice)
+{
+    (void)p;
+    (void)pArgs;
+    *ppDevice = NULL;
+    return E_NOTIMPL;
+}
+
+void triton12_backend_destroy_device(struct TRITON12_DEVICE *p)
+{
+    (void)p;
+}
+
+BOOL triton12_backend_host_takes_row_major_texture(ID3D12Device *pDevice)
+{
+    (void)pDevice;
+    return FALSE;
+}
+
+HRESULT triton12_backend_serialize_root_signature(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *pDesc,
+                                                  ID3DBlob **ppBlob, ID3DBlob **ppError)
+{
+    (void)pDesc;
+    *ppBlob = NULL;
+    if (ppError != NULL)
+    {
+        *ppError = NULL;
+    }
+    return E_NOTIMPL;
+}
+
+HRESULT triton12_backend_create_queue(struct TRITON12_DEVICE *p, struct TRITON12_QUEUE *q)
+{
+    (void)p;
+    (void)q;
+    return E_NOTIMPL;
+}
+
+void triton12_backend_destroy_queue(struct TRITON12_DEVICE *p, struct TRITON12_QUEUE *q)
+{
+    (void)p;
+    (void)q;
+}
+
+BOOL triton12_backend_gate_queue(struct TRITON12_QUEUE *q)
+{
+    (void)q;
+    return FALSE;
+}
+
+HRESULT triton12_backend_create_shared_surface(struct TRITON12_DEVICE *p, struct TRITON12_RESOURCE *r,
+                                               const D3D12_RESOURCE_DESC *pDesc, UINT flags,
+                                               ID3D12Resource **ppSurface, D3DKMT_HANDLE *phAllocation)
+{
+    (void)p;
+    (void)r;
+    (void)pDesc;
+    (void)flags;
+    *ppSurface = NULL;
+    *phAllocation = 0;
+    return E_NOTIMPL;
+}
+
+void triton12_backend_destroy_shared_surface(struct TRITON12_DEVICE *p, struct TRITON12_RESOURCE *r)
+{
+    (void)p;
+    (void)r;
+}
+
+D3DKMT_HANDLE triton12_backend_allocate_empty(struct TRITON12_DEVICE *p, HANDLE hRTResource)
+{
+    (void)p;
+    (void)hRTResource;
+    return 0;
+}
+
+HRESULT APIENTRY OpenAdapter12(D3D12DDIARG_OPENADAPTER *pOpenData)
+{
+    return tritonOpenAdapter12(pOpenData, NULL);
 }
