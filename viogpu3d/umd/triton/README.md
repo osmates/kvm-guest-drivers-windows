@@ -2,8 +2,8 @@
 
 Triton's D3D10/11 and DXGI DDI layer: it turns the Direct3D runtime's DDI calls into `ID3D11Device` and
 `ID3D11DeviceContext` calls. MIT, Copyright 2026 Turing Software LLC: see `LICENSE`. The package carries it beside
-the driver in `viogpu3d_umd_notices.txt`, which `Tools/build-macos.sh --d3d-umd` writes and
-`umd/tests/check-package.sh` checks.
+the drivers in `viogpu3d_umd_notices.txt`, which `Tools/build-macos.sh` writes and `umd/tests/check-package.sh`
+checks.
 
 ## Source
 
@@ -39,6 +39,9 @@ the stack below it.
   `tritonOpenResource` takes the texture and its description from `triton_backend_open_shared_texture`;
   `tritonDestroyResource` ends with `triton_backend_destroy_resource`, after the D3D11 releases, where Neptune
   released its import first.
+- `tritonDDI.c`: the slots Triton leaves unimplemented get one stub per slot type, with that slot's parameters, in
+  place of one stub cast into every slot. On x86 the callee pops its arguments (stdcall), so the cast stub would
+  have left the caller's stack wrong; on x64 and ARM64 nothing changes.
 - `tritonDxgi.c`, `tritonPresentTiming.h`, `tritonShader.c`, `tritonDxbc.c`, `triton_log.h`: the debug switches, the
   shared format, the shader workaround bits and the log go through the backend.
 - `triton.h`: `TRITON_ADAPTER` and `TRITON_DEVICE` carry `pBackend` in place of the kernel-mode state; it includes

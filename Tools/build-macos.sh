@@ -17,10 +17,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WDK_DIR="${WDK_DIR:-$(dirname "${REPO}")/wdk}"
 VENUS_ICD_DIR="${VENUS_ICD_DIR:-$(dirname "${REPO}")/mesa-venus-windows-build/build/src/virtio/vulkan}"
+VENUS_ICD_ARM64EC_DIR="${VENUS_ICD_ARM64EC_DIR:-$(dirname "${REPO}")/mesa-venus-windows-arm64ec-build/build/src/virtio/vulkan}"
+VENUS_ICD_X86_DIR="${VENUS_ICD_X86_DIR:-$(dirname "${REPO}")/mesa-venus-windows-x86-build/build/src/virtio/vulkan}"
 MINGW_DIR="${MINGW_DIR:-$(dirname "${REPO}")/llvm-mingw}"
 DXVK_PATCHES="${DXVK_PATCHES:-$(dirname "${REPO}")/dxvk-patches}"
 UMD_DIR="${REPO}/viogpu3d/umd"
 UMD_DLL=viogpu3d_umd.dll
+UMD_DLL_X86=viogpu3d_umd_x86.dll
+ICD_DLL=vulkan_virtio.dll
+ICD_DLL_X86=vulkan_virtio_x86.dll
 UMD_NOTICES=viogpu3d_umd_notices.txt
 
 KIT_VERSION="10.0.28000.2526"
@@ -37,7 +42,8 @@ usage() {
 Usage:
   Tools/build-macos.sh fetch
   Tools/build-macos.sh [--config "Win11 Release"|"Win10 Release"] [--test-sign] [--venus-icd DIR]
-                       [--d3d-umd] [--dxvk-patches DIR] [project.vcxproj ...]
+                       [--venus-icd-arm64ec DIR] [--venus-icd-x86 DIR] [--d3d-umd] [--dxvk-patches DIR]
+                       [project.vcxproj ...]
 
 fetch downloads the WDK and Windows SDK NuGet packages for ARM64 (${KIT_VERSION}) from
 nuget.org into WDK_DIR, checks each against the SHA-512 in nuget.org's catalog and unpacks it.
@@ -53,21 +59,35 @@ lld-link, stamps DriverVer into a copy of the INX and, with Feature_PackOne, cop
 .pdb and .inf into Install/<OS>/ARM64 as the Windows build does. Without a project it builds
 ${DEFAULT_PROJECTS[*]}.
 
-A package whose INF lists vulkan_virtio.dll (viogpu3d's) also gets Mesa's Venus Vulkan driver:
---venus-icd names the folder of vulkan_virtio.dll and virtio_icd.aarch64.json from a Mesa build for
-aarch64-w64-mingw32 configured with -Dvulkan-icd-dir=bin (src/virtio/vulkan in its build folder),
-by default the build in mesa-venus-windows-build/build next to this clone. They go into the
-package as vulkan_virtio.dll and vulkan_virtio.json.
+A package whose INF lists ${ICD_DLL} (viogpu3d's) also gets Mesa's Venus Vulkan driver, from
+three Mesa builds configured with -Dvulkan-icd-dir=bin, each named by the src/virtio/vulkan folder
+in its build folder: --venus-icd for aarch64-w64-mingw32, --venus-icd-arm64ec for
+arm64ec-w64-mingw32 and --venus-icd-x86 for i686-w64-mingw32 (by default mesa-venus-windows-build,
+mesa-venus-windows-arm64ec-build and mesa-venus-windows-x86-build next to this clone, each with
+its build in build). The first two link the same objects with the same flags; ld.lld links both
+into one ARM64X ${ICD_DLL} with -marm64x, whose ARM64EC view x64 processes load. The x86 driver
+goes in as ${ICD_DLL_X86}, linked again from its build's link command. Both links add the version
+resource of viogpu3d/umd/vulkan_virtio.rc, so their file version is the DriverVer version of this
+build. Their manifests go in as vulkan_virtio.json and vulkan_virtio_x86.json.
 
 A package whose INF lists ${UMD_DLL} (viogpu3d's) also gets the Direct3D 10 and 11 user-mode
 driver of viogpu3d/umd. --d3d-umd builds it first, into viogpu3d/umd/objfre_<os>_arm64, with
-llvm-mingw for aarch64-w64-mingw32: DXVK from the viogpu3d/umd/dxvk submodule with meson and its
-umd option, Triton and the driver's own sources. Its file version is the DriverVer version of this
-build. ${UMD_NOTICES} beside it carries the licences of the third-party code in it. Without
---d3d-umd the package takes the files an earlier --d3d-umd left there, and the package check
-refuses the DLL when its version differs. A DXVK checkout that has no umd meson option yet gets
-the patches of a folder first (*.patch, in name order, applied with patch -p1 to a copy): the one
---dxvk-patches names, by default dxvk-patches next to this clone. After packing,
+llvm-mingw: DXVK from the viogpu3d/umd/dxvk submodule with meson and its umd option, Triton and the
+driver's own sources, each for aarch64-w64-mingw32, arm64ec-w64-mingw32 and i686-w64-mingw32. The
+first two make the ARM64X ${UMD_DLL}, the last ${UMD_DLL_X86}. Their file version is the
+DriverVer version of this build. Without --d3d-umd the package takes the files an earlier
+--d3d-umd left there, and the package check refuses a DLL whose version differs. A DXVK checkout
+that has no umd meson option yet gets the patches of a folder first (*.patch, in name order,
+applied with patch -p1 to a copy): the one --dxvk-patches names, by default dxvk-patches next to
+this clone.
+
+${UMD_NOTICES}, written into the package, carries the licences of the third-party code in
+these drivers: Triton and DXVK with the DXVK subprojects linked in, from this tree and the DXVK copy of
+--d3d-umd, Mesa's, from the licence statement and copyright lines of every Mesa source and header
+the three Venus builds compiled (ninja's dependency records), with the licence texts of the Mesa
+tree's licenses folder, and the toolchain's: every DLL links llvm-mingw's runtime statically, so
+the licences llvm-mingw ships for mingw-w64's runtime and for LLVM's libc++, libunwind and
+compiler-rt, from MINGW_DIR and the llvm-mingw each Venus build linked with. After packing,
 viogpu3d/umd/tests/check-package.sh checks the package.
 
 --test-sign signs those .sys files with build/TestCert.pfx, a self-signed code signing
@@ -76,9 +96,11 @@ machine trusts. No keychain is used.
 
 Needs clang, lld-link, llvm-lib and llvm-rc from one LLVM (tested with 22.1 and 23.1),
 xmllint, curl, unzip and openssl, and osslsigncode for --test-sign. --d3d-umd also needs the
-llvm-mingw of fetch, meson, ninja, rsync, patch and glslang (or glslangValidator) on PATH, and the
-DXVK submodule checked out with its own submodules. WDK_DIR and this clone must be on a
-case-insensitive volume (the macOS default): the kit's headers include each other in mixed case.
+llvm-mingw of fetch, meson, rsync, patch and glslang (or glslangValidator) on PATH, and the DXVK
+submodule checked out with its own submodules. Packing viogpu3d needs ninja, python3 and the
+llvm-mingw of fetch. WDK_DIR
+and this clone must be on a case-insensitive volume (the macOS default): the kit's headers include
+each other in mixed case.
 
 Environment:
   WDK_DIR            unpacked packages (default: wdk next to this clone, ${WDK_DIR})
@@ -89,6 +111,8 @@ Environment:
                      driver version parts, as with MSBuild (defaults from build/Driver.RHEL.props)
   TEST_CERT_SUBJECT  subject of a new test certificate (default: /CN=OSMates GPU Test)
   VENUS_ICD_DIR      the folder --venus-icd names (default: ${VENUS_ICD_DIR})
+  VENUS_ICD_ARM64EC_DIR, VENUS_ICD_X86_DIR
+                     the folders --venus-icd-arm64ec and --venus-icd-x86 name
   MINGW_DIR          unpacked llvm-mingw (default: llvm-mingw next to this clone, ${MINGW_DIR})
   DXVK_PATCHES       the folder --dxvk-patches names (default: ${DXVK_PATCHES})
 
@@ -457,21 +481,116 @@ inf_source_files() {
         }'
 }
 
+# The Mesa build a folder of Venus's (src/virtio/vulkan in it) belongs to.
+mesa_build_of() {
+    local dir
+    dir=$(cd "$1" && pwd)
+    while [[ "${dir}" != / && ! -f "${dir}/meson-info/meson-info.json" ]]; do
+        dir=$(dirname "${dir}")
+    done
+    [[ "${dir}" != / ]] || die "$1 is not in a Mesa build folder (no meson-info above it)"
+    printf '%s' "${dir}"
+}
+
+# check_icd_build <folder> <llvm-objdump format> <manifest>: a Venus build Windows can use from the package.
 # Mesa writes .\vulkan_virtio.dll as library_path when configured with -Dvulkan-icd-dir=bin: the DLL next to the
 # manifest, which is how the package installs them.
-pack_venus_icd() {
-    local pack=$1 dll manifest
-    dll="${VENUS_ICD_DIR}/vulkan_virtio.dll"
-    manifest="${VENUS_ICD_DIR}/virtio_icd.aarch64.json"
-    [[ -f "${dll}" && -f "${manifest}" ]] ||
-        die "${PROJ}: its INF ships the Venus Vulkan driver, and ${VENUS_ICD_DIR} has no vulkan_virtio.dll and" \
-            "virtio_icd.aarch64.json; pass --venus-icd with the folder of Mesa's vulkan_virtio.dll"
-    "$(llvm_tool llvm-objdump)" -f "${dll}" | grep -q 'file format coff-arm64' || die "${dll} is not an ARM64 DLL"
+check_icd_build() {
+    local dir=$1 format=$2 manifest="$1/$3"
+    [[ -f "${dir}/${ICD_DLL}" && -f "${manifest}" ]] ||
+        die "${PROJ}: its INF ships the Venus Vulkan driver, and ${dir} has no ${ICD_DLL} and $3; pass" \
+            "--venus-icd, --venus-icd-arm64ec and --venus-icd-x86 with the src/virtio/vulkan folders of Mesa's builds"
+    "$(llvm_tool llvm-objdump)" -f "${dir}/${ICD_DLL}" | grep -q "file format ${format}\$" ||
+        die "${dir}/${ICD_DLL} is not ${format}"
     tr -d '\r' <"${manifest}" | grep -q '"library_path": *"\.\\\\vulkan_virtio\.dll"' ||
         die "${manifest}: library_path is not .\\vulkan_virtio.dll; configure Mesa with -Dvulkan-icd-dir=bin"
-    cp "${dll}" "${pack}/vulkan_virtio.dll"
-    cp "${manifest}" "${pack}/vulkan_virtio.json"
-    note "packed the Venus Vulkan driver of ${VENUS_ICD_DIR}"
+}
+
+# link_icd <out> <resource object> <ICD folder> [<aarch64 ICD folder>]: the ICD build's link again, into <out>, with
+# the version resource. With an aarch64 build, the ARM64X driver: -marm64x and the aarch64 build's object or library
+# after each of the ARM64EC build's own, which lld puts in its view.
+link_icd() {
+    local out=$1 res=$2 build native="" target
+    build=$(mesa_build_of "$3")
+    target="$(cd "$3" && pwd)"
+    target="${target#"${build}"/}/${ICD_DLL}"
+    if [[ -n "${4:-}" ]]; then
+        native=$(mesa_build_of "$4")
+        [[ "$(cd "$4" && pwd)" == "${native}/${target%/*}" ]] || die "$4 and $3 are not the same folder of their builds"
+    fi
+    python3 -I - "$(command -v ninja)" "${target}" "${out}" "${res}" "${build}" ${native:+"${native}"} <<'EOF'
+import os
+import shlex
+import subprocess
+import sys
+
+ninja, target, out, res, build = sys.argv[1:6]
+native_build = sys.argv[6] if len(sys.argv) > 6 else None
+
+
+def link_command(build):
+    commands = subprocess.run([ninja, "-C", build, "-t", "commands", target], check=True, capture_output=True,
+                              text=True).stdout.splitlines()
+    return shlex.split(commands[-1])
+
+
+own = link_command(build)
+cmd = [own[0]]
+builds = [build]
+if native_build:
+    native = link_command(native_build)
+    if not own[0].endswith("arm64ec-w64-mingw32-clang++") or not native[0].endswith("aarch64-w64-mingw32-clang++"):
+        sys.exit(f"build-macos: {build} is not an arm64ec-w64-mingw32 build or {native_build} not an "
+                 "aarch64-w64-mingw32 one")
+    if native[1:] != own[1:]:
+        sys.exit(f"build-macos: {native_build} and {build} link {target} differently; configure both with the "
+                 "same options")
+    cmd.append("-marm64x")
+    builds.append(native_build)
+args = iter(own[1:])
+for arg in args:
+    if arg == "-o":
+        next(args)
+        cmd += ["-o", os.path.join(out, "vulkan_virtio.dll")]
+    elif arg.startswith("-Wl,--out-implib="):
+        cmd.append("-Wl,--out-implib=" + os.path.join(out, "vulkan_virtio.dll.a"))
+    elif native_build and not arg.startswith("-") and not os.path.isabs(arg) and arg.endswith((".obj", ".o", ".a")):
+        for each in builds:
+            if not os.path.isfile(os.path.join(each, arg)):
+                sys.exit(f"build-macos: no {arg} in {each}")
+            cmd.append(os.path.join(each, arg))
+    elif not arg.startswith("-") and not os.path.isabs(arg) and os.path.isfile(os.path.join(build, arg)):
+        cmd.append(os.path.join(build, arg))
+    else:
+        cmd.append(arg)
+subprocess.run(cmd + [res], cwd=build, check=True)
+EOF
+}
+
+# One ARM64X Venus driver for ARM64 and x64 processes, and one for x86 processes, with their manifests. Each is linked
+# again with a version resource: Mesa's builds have none.
+pack_venus_icd() {
+    local pack=$1 tmp
+    command -v ninja >/dev/null || die "packing the Venus Vulkan driver needs ninja"
+    check_icd_build "${VENUS_ICD_DIR}" coff-arm64 virtio_icd.aarch64.json
+    check_icd_build "${VENUS_ICD_ARM64EC_DIR}" coff-arm64ec virtio_icd.aarch64.json
+    check_icd_build "${VENUS_ICD_X86_DIR}" coff-i386 virtio_icd.i686.json
+    tmp=$(mktemp -d)
+    mkdir -p "${tmp}/arm64x" "${tmp}/x86"
+    version_resource vulkan_virtio.rc arm64 ARM64 "${tmp}/arm64x/vulkan_virtio.res.o"
+    version_resource vulkan_virtio.rc x86 x86 "${tmp}/x86/vulkan_virtio.res.o" VIOGPU3D_ICD_X86
+    link_icd "${tmp}/arm64x" "${tmp}/arm64x/vulkan_virtio.res.o" "${VENUS_ICD_ARM64EC_DIR}" "${VENUS_ICD_DIR}" ||
+        { rm -rf "${tmp}"; die "the ARM64X link of ${ICD_DLL} failed"; }
+    link_icd "${tmp}/x86" "${tmp}/x86/vulkan_virtio.res.o" "${VENUS_ICD_X86_DIR}" ||
+        { rm -rf "${tmp}"; die "the link of ${ICD_DLL_X86} failed"; }
+    cp "${tmp}/arm64x/vulkan_virtio.dll" "${pack}/${ICD_DLL}"
+    cp "${tmp}/x86/vulkan_virtio.dll" "${pack}/${ICD_DLL_X86}"
+    rm -rf "${tmp}"
+    cp "${VENUS_ICD_DIR}/virtio_icd.aarch64.json" "${pack}/vulkan_virtio.json"
+    sed 's/"\.\\\\vulkan_virtio\.dll"/".\\\\vulkan_virtio_x86.dll"/' "${VENUS_ICD_X86_DIR}/virtio_icd.i686.json" \
+        >"${pack}/vulkan_virtio_x86.json"
+    note "packed the Venus Vulkan drivers of ${VENUS_ICD_DIR}, ${VENUS_ICD_ARM64EC_DIR} (one ARM64X DLL) and" \
+        "${VENUS_ICD_X86_DIR}, version ${STAMPINF_VERSION}"
 }
 
 UMD_TRITON_SOURCES=(tritonDDI.c tritonDxbc.c tritonDxgi.c tritonHostCaps.c tritonPresent.c tritonQuery.c
@@ -482,6 +601,8 @@ UMD_SOURCES=(umd_adapter_info.c umd_backend.c umd_format.c umd_main.c umd_path.c
 UMD_DXVK_LIBS=(src/d3d11/libd3d11_umd.a src/dxgi/libdxgi_umd.a src/dxvk/libdxvk.a src/spirv/libspirv.a
     src/util/libutil.a src/vulkan/libvkcommon.a src/wsi/libwsi.a subprojects/dxbc-spirv/libdxbc_spv.a
     subprojects/libdisplay-info/libdisplay-info.a)
+# The native and ARM64EC views of the ARM64X driver, and the x86 driver.
+UMD_ARCHES=(aarch64 arm64ec i686)
 
 umd_out() {
     printf '%s/objfre_%s_arm64' "${UMD_DIR}" "$(printf '%s' "${TARGET_OS}" | tr '[:upper:]' '[:lower:]')"
@@ -522,145 +643,407 @@ umd_dxvk_source() {
     rsync -rlp --checksum --delete "${out}/dxvk-stage/" "${out}/dxvk-src/"
 }
 
-# A changed cross file (llvm-mingw or glslang moved) sets DXVK up from scratch: a reconfigure keeps the old compilers.
+# umd_dxvk_build <out> <llvm-mingw bin> <arch>: DXVK's static libraries for one target, in <out>/<arch>/dxvk-build. A
+# changed cross file (llvm-mingw or glslang moved) sets DXVK up from scratch: a reconfigure keeps the old compilers.
 umd_dxvk_build() {
-    local out=$1 mingw=$2 cross="$1/aarch64-w64-mingw32.txt" glslang
+    local dir="$1/$3" mingw=$2 arch=$3 triple="$3-w64-mingw32" family=aarch64 cross glslang
+    cross="${dir}/cross.txt"
     { command -v meson && command -v ninja; } >/dev/null || die "--d3d-umd needs meson and ninja"
     glslang=$(command -v glslang || command -v glslangValidator || true)
     [[ -n "${glslang}" ]] || die "--d3d-umd needs glslang for DXVK's shaders (brew install glslang)"
+    # ARM64EC code is ARM64 code; DXVK's meson tells only x86 apart.
+    [[ "${arch}" != i686 ]] || family=x86
+    mkdir -p "${dir}"
     cat >"${cross}.new" <<EOF
 [binaries]
-c = '${mingw}/aarch64-w64-mingw32-clang'
-cpp = '${mingw}/aarch64-w64-mingw32-clang++'
-ar = '${mingw}/aarch64-w64-mingw32-llvm-ar'
-strip = '${mingw}/aarch64-w64-mingw32-strip'
-windres = '${mingw}/aarch64-w64-mingw32-windres'
+c = '${mingw}/${triple}-clang'
+cpp = '${mingw}/${triple}-clang++'
+ar = '${mingw}/${triple}-llvm-ar'
+strip = '${mingw}/${triple}-strip'
+windres = '${mingw}/${triple}-windres'
 pkg-config = '/usr/bin/false'
 glslang = '${glslang}'
 
 [host_machine]
 system = 'windows'
-cpu_family = 'aarch64'
-cpu = 'aarch64'
+cpu_family = '${family}'
+cpu = '${arch}'
 endian = 'little'
 EOF
     if cmp -s "${cross}.new" "${cross}"; then
         rm "${cross}.new"
     else
-        rm -rf "${out}/dxvk-build"
+        rm -rf "${dir}/dxvk-build"
         mv "${cross}.new" "${cross}"
     fi
-    if [[ ! -f "${out}/dxvk-build/build.ninja" ]]; then
-        meson setup "${out}/dxvk-build" "${out}/dxvk-src" --cross-file "${cross}" --buildtype=release \
-            -Db_ndebug=true -Dumd=true >"${out}/dxvk-setup.log" ||
-            die "DXVK's meson setup failed; see ${out}/dxvk-setup.log"
+    if [[ ! -f "${dir}/dxvk-build/build.ninja" ]]; then
+        meson setup "${dir}/dxvk-build" "$1/dxvk-src" --cross-file "${cross}" --buildtype=release \
+            -Db_ndebug=true -Dumd=true >"${dir}/dxvk-setup.log" ||
+            die "DXVK's meson setup for ${triple} failed; see ${dir}/dxvk-setup.log"
     fi
-    ninja -C "${out}/dxvk-build" || die "DXVK did not build"
+    ninja -C "${dir}/dxvk-build" || die "DXVK did not build for ${triple}"
+    local lib
+    for lib in "${UMD_DXVK_LIBS[@]}"; do
+        [[ -f "${dir}/dxvk-build/${lib}" ]] || die "DXVK built no ${lib} for ${triple}"
+    done
 }
 
-# The licences of the third-party code in the driver, in full: MIT asks every copy to carry its notice.
-umd_notices() {
-    local out=$1 src="$1/dxvk-src" licence name
+# umd_compile <out> <llvm-mingw bin> <arch>: Triton into <out>/<arch>/libtriton.a and the driver's objects into
+# <out>/<arch>/obj.
+umd_compile() {
+    local out=$1 dir="$1/$3" cc="$2/$3-w64-mingw32-clang" src cflags triton=() undefined
+    mkdir -p "${dir}/obj"
+    # d3d10umddi.h defines its D3D10 constants in every C file that includes it; d3d10.h has them already. The kits'
+    # headers are system headers: on x86, d3dkmthk.h declares a stdcall function without a prototype.
+    cflags=(-std=gnu11 -O2 -g -gcodeview -Wall -Wno-unknown-pragmas -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00
+        -D_D3D10_CONSTANTS -D_D3D10_1_CONSTANTS -isystem "${out}/winddk" "-I${UMD_DIR}/triton")
+    for src in "${UMD_TRITON_SOURCES[@]}"; do
+        "${cc}" "${cflags[@]}" -c "${UMD_DIR}/triton/${src}" -o "${dir}/obj/${src%.c}.o"
+        triton+=("${dir}/obj/${src%.c}.o")
+    done
+    rm -f "${dir}/libtriton.a"
+    "$2/llvm-ar" rcs "${dir}/libtriton.a" "${triton[@]}"
+    undefined=$("$2/llvm-nm" -u "${dir}/libtriton.a" | grep -E '(^|[^A-Za-z0-9_])npt_' || true)
+    [[ -z "${undefined}" ]] || die "Triton still calls Neptune: ${undefined}"
+    "${cc}" "${cflags[@]}" -c "${UMD_DIR}/triton/triton_backend_null.c" -o "${dir}/obj/triton_backend_null.o"
+    for src in "${UMD_SOURCES[@]}"; do
+        "${cc}" "${cflags[@]}" -Wextra -Werror "-I${UMD_DIR}/src" "-I${out}/dxvk-src/src/d3d11" \
+            "-I${out}/dxvk-src/include/vulkan/include" -c "${UMD_DIR}/src/${src}" -o "${dir}/obj/${src%.c}.o"
+    done
+}
+
+# umd_inputs <out> <arch>...: the driver's objects, Triton and DXVK for those targets, in link order.
+umd_inputs() {
+    local out=$1 arch src lib
+    shift
+    for arch in "$@"; do
+        for src in "${UMD_SOURCES[@]}"; do
+            printf '%s\n' "${out}/${arch}/obj/${src%.c}.o"
+        done
+    done
+    for arch in "$@"; do
+        printf '%s\n' "${out}/${arch}/libtriton.a"
+    done
+    for arch in "$@"; do
+        for lib in "${UMD_DXVK_LIBS[@]}"; do
+            printf '%s\n' "${out}/${arch}/dxvk-build/${lib}"
+        done
+    done
+}
+
+# version_resource <rc file in viogpu3d/umd> <machine> <VER_ARCH> <object> [rc define]: a DLL's version resource, with
+# the defines of viogpu3d.sys's.
+version_resource() {
+    local rc=$1 machine=$2 ver_arch=$3 object=$4 flags=() flag
+    [[ -x "${MINGW_DIR}/bin/llvm-cvtres" ]] || die "no llvm-mingw in ${MINGW_DIR}; run Tools/build-macos.sh fetch"
+    rc_flags
+    for flag in "${RCFLAGS[@]}"; do
+        [[ "${flag}" == /DVER_ARCH=* ]] && flag="/DVER_ARCH=${ver_arch}"
+        flags+=("${flag}")
+    done
+    [[ -z "${5:-}" ]] || flags+=("/D$5")
+    (cd "${UMD_DIR}" && "${LLVM_RC}" "${flags[@]}" "/I${UM_INC}" "/I${SDK_SHARED_INC}" "/I${WDK_SHARED_INC}" \
+        /FO "${object%.o}" "${rc}")
+    "${MINGW_DIR}/bin/llvm-cvtres" "/machine:${machine}" "/out:${object}" "${object%.o}" >/dev/null
+}
+
+# viogpu3d's Direct3D user-mode drivers: Triton's DDI translation, the driver's backend and DXVK in one DLL, built for
+# three targets. The aarch64 and arm64ec builds link into one ARM64X DLL: ARM64 processes load its native view, x64
+# processes under emulation its ARM64EC view. x86 processes load the i686 DLL.
+build_d3d_umd() {
+    local mingw="${MINGW_DIR}/bin" out arch inputs=() inputs_x86=() line
+    for arch in "${UMD_ARCHES[@]}"; do
+        [[ -x "${mingw}/${arch}-w64-mingw32-clang" ]] ||
+            die "--d3d-umd needs llvm-mingw in ${MINGW_DIR}; run Tools/build-macos.sh fetch"
+    done
+    out=$(umd_out)
+    mkdir -p "${out}"
+
+    note "${UMD_DLL}, ${UMD_DLL_X86}: DXVK sources"
+    umd_dxvk_source "${out}"
+    umd_ddi_headers "${out}/winddk"
+    for arch in "${UMD_ARCHES[@]}"; do
+        note "DXVK, Triton and the driver for ${arch}-w64-mingw32"
+        umd_dxvk_build "${out}" "${mingw}" "${arch}"
+        umd_compile "${out}" "${mingw}" "${arch}"
+    done
+
+    rm -f "${out}/triton_null.dll" "${out}/triton_null_x86.dll"
+    "${mingw}/arm64ec-w64-mingw32-clang" -marm64x -shared -o "${out}/triton_null.dll" \
+        "${UMD_DIR}/triton/triton_null.def" "${out}/aarch64/obj/triton_backend_null.o" \
+        "${out}/arm64ec/obj/triton_backend_null.o" "${out}/aarch64/libtriton.a" "${out}/arm64ec/libtriton.a" \
+        -static -ldxguid
+    "${mingw}/i686-w64-mingw32-clang" -shared -o "${out}/triton_null_x86.dll" "${UMD_DIR}/triton/triton_null.def" \
+        "${out}/i686/obj/triton_backend_null.o" "${out}/i686/libtriton.a" -static -ldxguid
+    note "Triton links with the null backend: ${out#"${REPO}"/}/triton_null.dll, triton_null_x86.dll"
+
+    copyright_years "$(prop "${REPO}/viogpu3d/viogpu3d/viogpu3d.props" CopyrightStrings)"
+    version_resource viogpu3d_umd.rc arm64 ARM64 "${out}/aarch64/obj/viogpu3d_umd.res.o"
+    version_resource viogpu3d_umd.rc x86 x86 "${out}/i686/obj/viogpu3d_umd.res.o" VIOGPU3D_UMD_X86
+
+    while IFS= read -r line; do
+        inputs+=("${line}")
+    done < <(umd_inputs "${out}" aarch64 arm64ec)
+    while IFS= read -r line; do
+        inputs_x86+=("${line}")
+    done < <(umd_inputs "${out}" i686)
+    rm -f "${out}/${UMD_DLL}" "${out}/${UMD_DLL_X86}"
+    "${mingw}/arm64ec-w64-mingw32-clang++" -marm64x -shared -g -o "${out}/${UMD_DLL}" "${UMD_DIR}/viogpu3d_umd.def" \
+        "${out}/aarch64/obj/viogpu3d_umd.res.o" "${inputs[@]}" -static -ldxguid -lgdi32 -lversion \
+        "-Wl,--pdb=${out}/viogpu3d_umd.pdb"
+    "${mingw}/i686-w64-mingw32-clang++" -shared -g -o "${out}/${UMD_DLL_X86}" "${UMD_DIR}/viogpu3d_umd.def" \
+        "${out}/i686/obj/viogpu3d_umd.res.o" "${inputs_x86[@]}" -static -ldxguid -lgdi32 -lversion \
+        "-Wl,--pdb=${out}/viogpu3d_umd_x86.pdb"
+    note "built ${out#"${REPO}"/}/${UMD_DLL} (ARM64X) and ${UMD_DLL_X86}, version ${STAMPINF_VERSION}"
+}
+
+pack_d3d_umd() {
+    local pack=$1 out dll
+    out=$(umd_out)
+    for dll in "${UMD_DLL}" "${UMD_DLL_X86}"; do
+        [[ -f "${out}/${dll}" ]] ||
+            die "${PROJ}: its INF ships the Direct3D drivers, and ${out#"${REPO}"/} has no ${dll}; pass --d3d-umd"
+        cp "${out}/${dll}" "${pack}/"
+        [[ ! -f "${out}/${dll%.dll}.pdb" ]] || cp "${out}/${dll%.dll}.pdb" "${pack}/"
+    done
+    note "packed the Direct3D drivers of ${out#"${REPO}"/}"
+}
+
+# mesa_notices <Mesa build>...: the licences of the Mesa code in the Venus drivers. Every Mesa file (source, header or
+# generated) that ninja's dependency records list for an object the driver links: its SPDX identifier, else the licence
+# its text states, else its subproject's licence file, else Mesa's (MIT); and its copyright lines.
+mesa_notices() {
+    python3 -I - "$(command -v ninja)" "${ICD_DLL}" "$@" <<'EOF'
+import json
+import os
+import re
+import subprocess
+import sys
+
+ninja, icd, builds = sys.argv[1], sys.argv[2], sys.argv[3:]
+SPDX = re.compile(r"SPDX-License-Identifier:\s*([A-Za-z0-9.+\- ()]+)")
+COPYRIGHT = re.compile(r"\bCopyright\b\s*(?::\s*)?(?:\(c\)|©)?\s*(?::\s*)?(?=\d{4}|©|\(c\))", re.I)
+COMMENT = re.compile(r"^\s*(?:/\*+|\*+/|\*+|//+|#+|;+)?\s?")
+STATED = [
+    ("Permission is hereby granted, free of charge", "MIT"),
+    ("License: MIT", "MIT"),
+    ("Boost Software License", "BSL-1.0"),
+    ("Licensed under the Apache License", "Apache-2.0"),
+    ("SGI Free Software B License", "SGI-B-2.0"),
+]
+# BLAKE3's own licence (github.com/BLAKE3-team/BLAKE3), which Mesa's copy does not repeat.
+BLAKE3 = "CC0-1.0 OR Apache-2.0"
+
+src = None
+files = {}
+for build in builds:
+    info = json.load(open(os.path.join(build, "meson-info", "meson-info.json")))
+    tree = os.path.realpath(info["directories"]["source"])
+    if src not in (None, tree):
+        sys.exit(f"build-macos: the Venus builds come from different Mesa trees: {src}, {tree}")
+    src = tree
+    root = os.path.realpath(build)
+    vulkan = os.path.join(root, "src", "virtio", "vulkan", icd)
+    target = os.path.relpath(vulkan, root)
+    inputs = subprocess.run([ninja, "-C", build, "-t", "inputs", target], check=True, capture_output=True,
+                            text=True).stdout.split()
+    objects = [i for i in inputs if i.endswith((".obj", ".o"))]
+    deps = subprocess.run([ninja, "-C", build, "-t", "deps", *objects], check=True, capture_output=True,
+                          text=True).stdout
+    for line in deps.splitlines():
+        if line.startswith(" ") and line.strip():
+            path = os.path.realpath(os.path.join(root, line.strip()))
+            if path.startswith(src + os.sep):
+                files[path] = os.path.relpath(path, src)
+            elif path.startswith(root + os.sep):
+                files[path] = os.path.relpath(path, root)
+
+licences = os.path.join(src, "licenses")
+
+
+def choose(expression):
+    """The licences to follow for an SPDX expression: MIT of an OR, else its first one Mesa has the text of."""
+    expression = expression.strip().strip("()")
+    if " OR " in expression:
+        options = [o.strip().strip("()") for o in expression.split(" OR ")]
+        for option in ["MIT"] + options:
+            if option in options and os.path.isfile(os.path.join(licences, option.split(" WITH ")[0])):
+                return choose(option)
+        return choose(options[0])
+    ids = []
+    for part in expression.split(" AND "):
+        ids += [p.strip() for p in part.split(" WITH ")]
+    return ids
+
+
+used = {}
+texts = {}
+notices = set()
+for path, rel in sorted(files.items(), key=lambda f: f[1]):
+    try:
+        head = open(path, encoding="utf-8", errors="replace").read(16384)
+    except OSError as error:
+        sys.exit(f"build-macos: {error}")
+    match = SPDX.search(head)
+    ids = None
+    if match:
+        ids = choose(match.group(1))
+    else:
+        for phrase, licence in STATED:
+            if phrase in head:
+                ids = [licence]
+                break
+    if ids is None and "Redistribution and use in source and binary forms" in head:
+        block = re.search(r"/\*(.*?Redistribution and use in source and binary forms.*?)\*/", head, re.S)
+        if block is None:
+            sys.exit(f"build-macos: {rel}: no comment with its licence")
+        texts[rel] = "\n".join(COMMENT.sub("", l).rstrip() for l in block.group(1).splitlines()).strip()
+        ids = []
+    if ids is None and "No copyright claimed" in head:
+        ids = []
+    if ids is None and rel.startswith("subprojects" + os.sep):
+        project = os.path.join(src, *rel.split(os.sep)[:2])
+        found = [f for f in sorted(os.listdir(project)) if f.upper().startswith(("LICENSE", "COPYING"))]
+        if not found:
+            sys.exit(f"build-macos: {rel} states no licence and {project} has no licence file")
+        texts[os.path.relpath(os.path.join(project, found[0]), src)] = open(os.path.join(project, found[0]),
+                                                                            encoding="utf-8").read().strip()
+        ids = []
+    if ids is None and rel.startswith(os.path.join("src", "util", "blake3") + os.sep):
+        ids = choose(BLAKE3)
+    if ids is None:
+        ids = ["MIT"]
+    for licence in ids:
+        used.setdefault(licence, 0)
+        used[licence] += 1
+    lines = [COMMENT.sub("", l).strip() for l in head.splitlines()]
+    for i, line in enumerate(lines):
+        if COPYRIGHT.search(line):
+            notice = line[COPYRIGHT.search(line).start():]
+            for more in lines[i + 1:i + 3]:
+                if not more or COPYRIGHT.search(more) or re.match(r"(Permission|Redistribution|All rights|SPDX|"
+                                                                  r"Licensed|This |Use of|The |See |Author)", more,
+                                                                  re.I):
+                    break
+                notice += " " + more
+            notice = re.sub(r"\s+", " ", notice.rstrip(" */")).strip()
+            notices.add(notice)
+
+print(f"== Mesa, https://gitlab.freedesktop.org/mesa/mesa, changed: the Venus Vulkan drivers ==")
+print()
+print(f"The Mesa files compiled into the Venus Vulkan drivers ({len(files)} sources, headers and generated files)")
+print("carry these copyright notices, under the licences that follow: each file's SPDX identifier, or the licence")
+print("its text states, says which; a file that states none is under Mesa's licence, MIT.")
+print()
+for notice in sorted(notices):
+    print(notice)
+for licence in sorted(used):
+    path = os.path.join(licences, licence)
+    if not os.path.isfile(path):
+        path = os.path.join(licences, "exceptions", licence)
+    if not os.path.isfile(path):
+        sys.exit(f"build-macos: Mesa has no text of {licence} in {licences}")
+    text = open(path, encoding="utf-8").read()
+    text = text.split("License-Text:", 1)[1] if "License-Text:" in text else text
+    print(f"\n-- {licence} (licenses/{os.path.relpath(path, licences)}) --\n")
+    print(text.strip())
+for rel, text in sorted(texts.items()):
+    print(f"\n-- The licence of {rel}, as it states it --\n")
+    print(text)
+EOF
+}
+
+# The llvm-mingw a Venus build linked its ICD with.
+icd_toolchain() {
+    local build target compiler
+    build=$(mesa_build_of "$1")
+    target="$(cd "$1" && pwd)"
+    compiler=$(ninja -C "${build}" -t commands "${target#"${build}"/}/${ICD_DLL}" | tail -1 | cut -d' ' -f1)
+    [[ "${compiler}" == */bin/*-w64-mingw32-clang++ ]] ||
+        die "${build} does not link ${ICD_DLL} with an llvm-mingw clang++: ${compiler}"
+    dirname "$(dirname "${compiler}")"
+}
+
+# toolchain_notices <llvm-mingw>...: the licences each llvm-mingw ships for the runtime code every DLL links statically,
+# once per distinct text.
+toolchain_notices() {
+    local root file known seen=()
+    printf '\n== The llvm-mingw runtime, https://github.com/mstorsjo/llvm-mingw: %s ==\n\n' \
+        "${UMD_DLL}, ${UMD_DLL_X86}, ${ICD_DLL}, ${ICD_DLL_X86}"
+    echo "Each DLL links parts of its toolchain's runtime statically: mingw-w64's startup code, libmingw32 and"
+    echo "libmingwex (gdtoa among it), and LLVM's libc++, libc++abi, libunwind and compiler-rt builtins. Their"
+    echo "licences, as llvm-mingw ships them:"
+    for root in "$@"; do
+        for file in "${root}/aarch64-w64-mingw32/share/mingw32/COPYING.MinGW-w64-runtime.txt" \
+            "${root}/i686-w64-mingw32/share/mingw32/COPYING.MinGW-w64-runtime.txt" "${root}/LICENSE.TXT"; do
+            [[ -f "${file}" ]] || die "no ${file#"${root}"/} in llvm-mingw ${root}"
+            for known in "${seen[@]+"${seen[@]}"}"; do
+                if cmp -s "${known}" "${file}"; then
+                    continue 2
+                fi
+            done
+            seen+=("${file}")
+            printf '\n-- %s --\n\n' "${file#"${root}"/}"
+            cat "${file}"
+        done
+    done
+}
+
+# The licences of the third-party code in the package's user-mode drivers, in full: MIT asks every copy to carry its
+# notice.
+write_notices() {
+    local pack=$1 out src licence name toolchains=("${MINGW_DIR}") dir root
+    out=$(umd_out)
+    src="${out}/dxvk-src"
+    [[ -f "${src}/LICENSE" ]] || die "${PROJ}: no DXVK copy in ${out#"${REPO}"/} for the notices; pass --d3d-umd"
+    for dir in "${VENUS_ICD_DIR}" "${VENUS_ICD_ARM64EC_DIR}" "${VENUS_ICD_X86_DIR}"; do
+        root=$(icd_toolchain "${dir}")
+        toolchains+=("${root}")
+    done
     {
-        echo "${UMD_DLL} contains the code below, each part under its own licence."
-        printf '\n== Triton, src/virtio/neptune/triton of https://github.com/osy/virtio-win-mesa, changed ==\n\n'
+        echo "${UMD_DLL}, ${UMD_DLL_X86}, ${ICD_DLL} and ${ICD_DLL_X86} contain the code below, each part under"
+        echo "its own licence."
+        printf '\n== Triton, src/virtio/neptune/triton of https://github.com/osy/virtio-win-mesa, changed: %s ==\n\n' \
+            "${UMD_DLL}, ${UMD_DLL_X86}"
         cat "${UMD_DIR}/triton/LICENSE"
-        printf '\n== DXVK, https://github.com/anonymix007/dxvk branch umd, changed ==\n\n'
+        printf '\n== DXVK, https://github.com/anonymix007/dxvk branch umd, changed: %s ==\n\n' \
+            "${UMD_DLL}, ${UMD_DLL_X86}"
         cat "${src}/LICENSE"
         for licence in "${src}"/subprojects/*/LICENSE; do
             [[ -f "${licence}" ]] || die "DXVK has no subprojects/*/LICENSE"
             name=$(basename "$(dirname "${licence}")")
-            printf '\n== %s, linked in by DXVK (subprojects/%s) ==\n\n' "${name}" "${name}"
+            printf '\n== %s, linked in by DXVK (subprojects/%s): %s ==\n\n' "${name}" "${name}" \
+                "${UMD_DLL}, ${UMD_DLL_X86}"
             cat "${licence}"
         done
-    } >"${out}/${UMD_NOTICES}"
-}
-
-# viogpu3d's Direct3D user-mode driver: Triton's DDI translation, the driver's backend and DXVK in one DLL, whose
-# version resource takes the defines of viogpu3d.sys's.
-build_d3d_umd() {
-    local mingw="${MINGW_DIR}/bin" cc out obj src lib cflags triton=() objs=() libs=() undefined
-    [[ -x "${mingw}/aarch64-w64-mingw32-clang" ]] ||
-        die "--d3d-umd needs llvm-mingw in ${MINGW_DIR}; run Tools/build-macos.sh fetch"
-    cc="${mingw}/aarch64-w64-mingw32-clang"
-    out=$(umd_out)
-    obj="${out}/obj"
-    mkdir -p "${obj}"
-
-    note "${UMD_DLL}: DXVK"
-    umd_dxvk_source "${out}"
-    umd_dxvk_build "${out}" "${mingw}"
-    umd_ddi_headers "${out}/winddk"
-
-    # d3d10umddi.h defines its D3D10 constants in every C file that includes it; d3d10.h has them already.
-    cflags=(-std=gnu11 -O2 -g -gcodeview -Wall -Wno-unknown-pragmas -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00
-        -D_D3D10_CONSTANTS -D_D3D10_1_CONSTANTS "-I${out}/winddk" "-I${UMD_DIR}/triton")
-
-    note "${UMD_DLL}: Triton"
-    for src in "${UMD_TRITON_SOURCES[@]}"; do
-        "${cc}" "${cflags[@]}" -c "${UMD_DIR}/triton/${src}" -o "${obj}/${src%.c}.o"
-        triton+=("${obj}/${src%.c}.o")
-    done
-    rm -f "${out}/libtriton.a"
-    "${mingw}/llvm-ar" rcs "${out}/libtriton.a" "${triton[@]}"
-    undefined=$("${mingw}/llvm-nm" -u "${out}/libtriton.a" | grep -E '(^|[^A-Za-z0-9_])npt_' || true)
-    [[ -z "${undefined}" ]] || die "Triton still calls Neptune: ${undefined}"
-    "${cc}" "${cflags[@]}" -c "${UMD_DIR}/triton/triton_backend_null.c" -o "${obj}/triton_backend_null.o"
-    "${cc}" -shared -o "${out}/triton_null.dll" "${UMD_DIR}/triton/triton_null.def" "${obj}/triton_backend_null.o" \
-        "${out}/libtriton.a" -static -ldxguid
-    note "Triton links with the null backend: ${out#"${REPO}"/}/triton_null.dll"
-
-    note "${UMD_DLL}: driver"
-    for src in "${UMD_SOURCES[@]}"; do
-        "${cc}" "${cflags[@]}" -Wextra -Werror "-I${UMD_DIR}/src" "-I${out}/dxvk-src/src/d3d11" \
-            "-I${out}/dxvk-src/include/vulkan/include" -c "${UMD_DIR}/src/${src}" -o "${obj}/${src%.c}.o"
-        objs+=("${obj}/${src%.c}.o")
-    done
-
-    copyright_years "$(prop "${REPO}/viogpu3d/viogpu3d/viogpu3d.props" CopyrightStrings)"
-    rc_flags
-    (cd "${UMD_DIR}" && "${LLVM_RC}" "${RCFLAGS[@]}" "/I${UM_INC}" "/I${SDK_SHARED_INC}" "/I${WDK_SHARED_INC}" \
-        /FO "${obj}/viogpu3d_umd.res" viogpu3d_umd.rc)
-    "${mingw}/llvm-cvtres" /machine:arm64 "/out:${obj}/viogpu3d_umd.res.o" "${obj}/viogpu3d_umd.res" >/dev/null
-
-    for lib in "${UMD_DXVK_LIBS[@]}"; do
-        [[ -f "${out}/dxvk-build/${lib}" ]] || die "DXVK built no ${lib}"
-        libs+=("${out}/dxvk-build/${lib}")
-    done
-    rm -f "${out}/${UMD_DLL}"
-    "${mingw}/aarch64-w64-mingw32-clang++" -shared -g -o "${out}/${UMD_DLL}" "${UMD_DIR}/viogpu3d_umd.def" \
-        "${objs[@]}" "${obj}/viogpu3d_umd.res.o" "${out}/libtriton.a" "${libs[@]}" \
-        -static -ldxguid -lgdi32 -lversion "-Wl,--pdb=${out}/viogpu3d_umd.pdb"
-    umd_notices "${out}"
-    note "built ${out#"${REPO}"/}/${UMD_DLL}, version ${STAMPINF_VERSION}"
-}
-
-pack_d3d_umd() {
-    local pack=$1 out
-    out=$(umd_out)
-    [[ -f "${out}/${UMD_DLL}" && -f "${out}/${UMD_NOTICES}" ]] ||
-        die "${PROJ}: its INF ships the Direct3D driver, and ${out#"${REPO}"/} has no ${UMD_DLL} and" \
-            "${UMD_NOTICES}; pass --d3d-umd"
-    cp "${out}/${UMD_DLL}" "${out}/${UMD_NOTICES}" "${pack}/"
-    [[ ! -f "${out}/viogpu3d_umd.pdb" ]] || cp "${out}/viogpu3d_umd.pdb" "${pack}/"
-    note "packed the Direct3D driver of ${out#"${REPO}"/}"
+        toolchain_notices "${toolchains[@]}"
+        echo
+        mesa_notices "$(mesa_build_of "${VENUS_ICD_DIR}")" "$(mesa_build_of "${VENUS_ICD_ARM64EC_DIR}")" \
+            "$(mesa_build_of "${VENUS_ICD_X86_DIR}")" || die "the Mesa notices failed"
+    } >"${pack}/${UMD_NOTICES}" || die "${PROJ}: could not write ${UMD_NOTICES}"
+    note "wrote ${UMD_NOTICES}"
 }
 
 # Files of a package that come from other builds, then a check that the package has every file its INF lists.
 pack_inf_files() {
-    local pack=$1 inf=$2 file
-    if inf_source_files "${inf}" | grep -q -x -i 'vulkan_virtio\.dll'; then
+    local pack=$1 inf=$2 file mesa_src
+    if inf_source_files "${inf}" | grep -q -x -i "${ICD_DLL//./\\.}"; then
         pack_venus_icd "${pack}"
     fi
     if inf_source_files "${inf}" | grep -q -x -i "${UMD_DLL//./\\.}"; then
         pack_d3d_umd "${pack}"
     fi
+    if inf_source_files "${inf}" | grep -q -x -i "${UMD_NOTICES//./\\.}"; then
+        write_notices "${pack}"
+    fi
     while IFS= read -r file; do
         [[ -f "${pack}/${file}" ]] || die "$(basename "${inf}") lists ${file}, which the package lacks"
     done < <(inf_source_files "${inf}")
     if inf_source_files "${inf}" | grep -q -x -i "${UMD_DLL//./\\.}"; then
-        LLVM_OBJDUMP="$(llvm_tool llvm-objdump)" sh "${UMD_DIR}/tests/check-package.sh" "${pack}" ||
-            die "the package check of ${pack#"${REPO}"/} failed"
+        mesa_src=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["directories"]["source"])' \
+            "$(mesa_build_of "${VENUS_ICD_DIR}")/meson-info/meson-info.json")
+        LLVM_OBJDUMP="$(llvm_tool llvm-objdump)" LLVM_READOBJ="$(llvm_tool llvm-readobj)" MESA_SRC="${mesa_src}" \
+            MINGW_DIR="${MINGW_DIR}" sh "${UMD_DIR}/tests/check-package.sh" "${pack}" || die "the package check of ${pack#"${REPO}"/} failed"
     fi
 }
 
@@ -875,6 +1258,14 @@ main() {
             --test-sign) sign=true ;;
             --venus-icd)
                 VENUS_ICD_DIR=${2:?}
+                shift
+                ;;
+            --venus-icd-arm64ec)
+                VENUS_ICD_ARM64EC_DIR=${2:?}
+                shift
+                ;;
+            --venus-icd-x86)
+                VENUS_ICD_X86_DIR=${2:?}
                 shift
                 ;;
             --d3d-umd) d3d_umd=true ;;

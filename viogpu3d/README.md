@@ -8,9 +8,11 @@ display-only driver in `viogpu` stays as it is.
 
 - Compiled for Windows 11 ARM64 with clang and lld-link through `Tools/build-macos.sh`. Not built with MSVC yet.
 - Not run in a guest yet.
-- The package carries Mesa's Venus Vulkan driver (`vulkan_virtio.dll`, named by `VulkanDriverName`), cross-built
-  for ARM64 with llvm-mingw, and the Direct3D 10 and 11 user-mode driver of `umd/` (`viogpu3d_umd.dll`, named by
-  `UserModeDriverName`), compiled but not loaded in Windows yet: `umd/README.md`.
+- The package carries Mesa's Venus Vulkan driver, cross-built with llvm-mingw: `vulkan_virtio.dll` (ARM64X, for
+  ARM64 and x64 processes, named by `VulkanDriverName`) and `vulkan_virtio_x86.dll` (named by
+  `VulkanDriverNameWow`). And the Direct3D 10 and 11 user-mode driver of `umd/`: `viogpu3d_umd.dll` (ARM64X, named by
+  `UserModeDriverName`) and `viogpu3d_umd_x86.dll` (named by `UserModeDriverNameWow`). Compiled, not loaded in
+  Windows yet: `umd/README.md`.
 
 ## Device
 
@@ -57,8 +59,7 @@ merge request 38731): the same tags and layouts.
 
 ## Not done yet
 
-- A run of the Direct3D user-mode driver in Windows; its D3D12 and D3D9 DDIs; 32-bit and ARM64EC builds of it and of
-  the Vulkan driver for x86 and x64 apps.
+- A run of the Direct3D user-mode driver in Windows, for ARM64, x64 and x86 apps; its D3D12 and D3D9 DDIs.
 - Hardware queues and the GPU's own scheduling.
 - After a power transition the host has lost its contexts and resources; the driver does not report a lost device
   yet.
@@ -66,13 +67,14 @@ merge request 38731): the same tags and layouts.
 
 ## Building
 
-On Windows, as the other drivers (`viogpu3d.sln`), with `viogpu3d_umd.dll`, `viogpu3d_umd_notices.txt`,
-`vulkan_virtio.dll` and `vulkan_virtio.json` put next to the INF before Inf2Cat; the MSBuild projects do not build or
-copy them yet. On macOS, `Tools/build-macos.sh --d3d-umd --venus-icd <mesa-build>/src/virtio/vulkan
-viogpu3d/viogpu3d/viogpu3d.vcxproj` builds the `.sys`, the user-mode driver with its licence notices
-(`umd/README.md`) and a stamped INF in `viogpu3d/Install/Win11/ARM64`, with the Vulkan driver of a Mesa build of the
-`venus-windows` branch of github.com/osmates/mesa for `aarch64-w64-mingw32`, configured with `-Dvulkan-icd-dir=bin`.
-The catalog is made on Windows with Inf2Cat.
+On Windows, as the other drivers (`viogpu3d.sln`), with the user-mode drivers, their manifests and
+`viogpu3d_umd_notices.txt` put next to the INF before Inf2Cat; the MSBuild projects do not build or copy them yet. On
+macOS, `Tools/build-macos.sh --d3d-umd viogpu3d/viogpu3d/viogpu3d.vcxproj` builds the `.sys`, the Direct3D drivers
+and a stamped INF in `viogpu3d/Install/Win11/ARM64`, with the Vulkan drivers of three Mesa builds of the
+`venus-windows` branch of github.com/osmates/mesa, for `aarch64-w64-mingw32`, `arm64ec-w64-mingw32` and
+`i686-w64-mingw32`, configured with `-Dvulkan-icd-dir=bin` (`--venus-icd`, `--venus-icd-arm64ec`, `--venus-icd-x86`),
+and writes the licence notices of the third-party code in them (`umd/README.md`). The catalog is made on Windows with
+Inf2Cat.
 
 ## Credits
 
