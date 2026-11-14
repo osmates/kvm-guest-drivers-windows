@@ -16,6 +16,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WDK_DIR="${WDK_DIR:-$(dirname "${REPO}")/wdk}"
+VENUS_ICD_DIR="${VENUS_ICD_DIR:-$(dirname "${REPO}")/mesa-venus-windows-build/build/src/virtio/vulkan}"
 
 KIT_VERSION="10.0.28000.2526"
 KIT_PACKAGES="microsoft.windows.wdk.arm64 microsoft.windows.sdk.cpp microsoft.windows.sdk.cpp.arm64"
@@ -44,8 +45,9 @@ ${DEFAULT_PROJECTS[*]}.
 
 A package whose INF lists vulkan_virtio.dll (viogpu3d's) also gets Mesa's Venus Vulkan driver:
 --venus-icd names the folder of vulkan_virtio.dll and virtio_icd.aarch64.json from a Mesa build for
-aarch64-w64-mingw32 configured with -Dvulkan-icd-dir=bin (src/virtio/vulkan in its build folder).
-They go into the package as vulkan_virtio.dll and vulkan_virtio.json.
+aarch64-w64-mingw32 configured with -Dvulkan-icd-dir=bin (src/virtio/vulkan in its build folder),
+by default the build in mesa-venus-windows-build/build next to this clone. They go into the
+package as vulkan_virtio.dll and vulkan_virtio.json.
 
 --test-sign signs those .sys files with build/TestCert.pfx, a self-signed code signing
 certificate that openssl makes on first use. build/TestCert.cer is the certificate a test
@@ -64,7 +66,7 @@ Environment:
   _RHEL_RELEASE_VERSION_, _BUILD_MAJOR_VERSION_, _BUILD_MINOR_VERSION_
                      driver version parts, as with MSBuild (defaults from build/Driver.RHEL.props)
   TEST_CERT_SUBJECT  subject of a new test certificate (default: /CN=OSMates GPU Test)
-  VENUS_ICD_DIR      the folder --venus-icd names
+  VENUS_ICD_DIR      the folder --venus-icd names (default: ${VENUS_ICD_DIR})
 
 Left for Windows:
   tracewpp           no WPP: a project whose WPP configuration is DbgPrint(LEVEL, (MSG, ...))
@@ -410,11 +412,11 @@ inf_source_files() {
 # manifest, which is how the package installs them.
 pack_venus_icd() {
     local pack=$1 dll manifest
-    [[ -n "${VENUS_ICD_DIR:-}" ]] ||
-        die "${PROJ}: its INF ships the Venus Vulkan driver; pass --venus-icd with the folder of Mesa's vulkan_virtio.dll"
     dll="${VENUS_ICD_DIR}/vulkan_virtio.dll"
     manifest="${VENUS_ICD_DIR}/virtio_icd.aarch64.json"
-    [[ -f "${dll}" && -f "${manifest}" ]] || die "no vulkan_virtio.dll and virtio_icd.aarch64.json in ${VENUS_ICD_DIR}"
+    [[ -f "${dll}" && -f "${manifest}" ]] ||
+        die "${PROJ}: its INF ships the Venus Vulkan driver, and ${VENUS_ICD_DIR} has no vulkan_virtio.dll and" \
+            "virtio_icd.aarch64.json; pass --venus-icd with the folder of Mesa's vulkan_virtio.dll"
     "$(llvm_tool llvm-objdump)" -f "${dll}" | grep -q 'file format coff-arm64' || die "${dll} is not an ARM64 DLL"
     tr -d '\r' <"${manifest}" | grep -q '"library_path": *"\.\\\\vulkan_virtio\.dll"' ||
         die "${manifest}: library_path is not .\\vulkan_virtio.dll; configure Mesa with -Dvulkan-icd-dir=bin"
