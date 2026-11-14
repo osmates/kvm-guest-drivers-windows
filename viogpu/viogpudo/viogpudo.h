@@ -149,8 +149,25 @@ class VioGpuAdapter : IVioGpuPCI
     {
         return m_Id;
     }
-    PBYTE GetEdidData(void);
+    PBYTE GetEdidData(UINT Scanout = 0);
     PBYTE GetCTA861Data(void);
+    // The device's scanouts, one source and one target each, at least one and at most MAX_VIEWS.
+    ULONG GetNumScanouts(void)
+    {
+        return max(1, min(m_u32NumScanouts, MAX_VIEWS));
+    }
+    BOOLEAN IsScanoutEnabled(UINT Scanout)
+    {
+        return Scanout < MAX_VIEWS && m_ScanoutEnabled[Scanout];
+    }
+    ULONG GetScanoutWidth(UINT Scanout)
+    {
+        return Scanout < MAX_VIEWS ? m_ScanoutWidth[Scanout] : 0;
+    }
+    ULONG GetScanoutHeight(UINT Scanout)
+    {
+        return Scanout < MAX_VIEWS ? m_ScanoutHeight[Scanout] : 0;
+    }
 
   protected:
   private:
@@ -169,6 +186,7 @@ class VioGpuAdapter : IVioGpuPCI
     void SetCustomDisplay(_In_ USHORT xres, _In_ USHORT yres);
     BOOLEAN CreateFrameBufferObj(PVIDEO_MODE_INFORMATION pModeInfo, CURRENT_MODE *pCurrentMode);
     void DestroyFrameBufferObj(BOOLEAN bReset, BOOLEAN bKeepBuffer);
+    void DestroyFrameBufferObj(UINT Scanout, BOOLEAN bReset, BOOLEAN bKeepBuffer);
     BOOLEAN CreateCursor(_In_ CONST DXGKARG_SETPOINTERSHAPE *pSetPointerShape, _In_ CONST CURRENT_MODE *pCurrentMode);
     BOOLEAN UpdateCursor(_In_ CONST DXGKARG_SETPOINTERSHAPE *pSetPointerShape, _In_ CONST CURRENT_MODE *pCurrentMode);
     void DestroyCursor(void);
@@ -188,8 +206,14 @@ class VioGpuAdapter : IVioGpuPCI
     USHORT m_CurrentModeIndex;
     USHORT m_CustomModeIndex;
     ULONG m_Id;
-    BYTE m_EDIDs[EDID_RAW_BLOCK_SIZE];
+    // Scanout 0's EDID, which the mode list is built from, and each scanout's for its monitor's descriptor.
+    BYTE m_EDIDs[MAX_CHILDREN][EDID_RAW_BLOCK_SIZE];
     BOOLEAN m_bEDID;
+    BOOLEAN m_bEDIDs[MAX_CHILDREN];
+    // What GET_DISPLAY_INFO last said of each scanout.
+    BOOLEAN m_ScanoutEnabled[MAX_VIEWS];
+    ULONG m_ScanoutWidth[MAX_VIEWS];
+    ULONG m_ScanoutHeight[MAX_VIEWS];
 
     VirtIODevice m_VioDev;
     CPciResources m_PciResources;
@@ -201,7 +225,8 @@ class VioGpuAdapter : IVioGpuPCI
     CrsrQueue m_CursorQueue;
     VioGpuBuf m_GpuBuf;
     VioGpuIdr m_Idr;
-    VioGpuObj *m_pFrameBuf;
+    // One framebuffer a scanout, by the scanout's index, which is its target's id.
+    VioGpuObj *m_pFrameBufs[MAX_VIEWS];
     VioGpuObj *m_pCursorBuf;
     // Serializes SetPointerShape against SetPointerPosition: dxgkrnl calls the two pointer DDIs from
     // different threads without synchronizing them. A concurrent MOVE_CURSOR can then interleave with the
@@ -217,7 +242,10 @@ class VioGpuAdapter : IVioGpuPCI
     UINT m_CursorHotX;
     UINT m_CursorHotY;
     VioGpuMemSegment m_CursorSegment;
+    // Scanout 0 keeps the memory it always had, BAR 0 or the block sized for the largest mode; the others take system
+    // memory for the mode they show.
     VioGpuMemSegment m_FrameSegment;
+    VioGpuMemSegment m_ScanoutSegments[MAX_VIEWS];
     volatile ULONG m_PendingWorks;
     KEVENT m_ConfigUpdateEvent;
     PETHREAD m_pWorkThread;
@@ -237,7 +265,8 @@ class VioGpuDod
     DEVICE_POWER_STATE m_AdapterPowerState;
     DRIVER_STATUS_FLAG m_Flags;
 
-    CURRENT_MODE m_CurrentMode;
+    // One a source, by its id; source n drives target n, which is scanout n.
+    CURRENT_MODE m_CurrentModes[MAX_VIEWS];
 
     DXGK_DISPLAY_INFORMATION m_SystemDisplayInfo;
 

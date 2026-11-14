@@ -300,7 +300,6 @@ BOOLEAN CtrlQueue::GetEdidInfo(PGPU_VBUFFER buf, UINT id, PBYTE edid)
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
     PGPU_CMD_GET_EDID cmd = (PGPU_CMD_GET_EDID)buf->buf;
     PGPU_RESP_EDID resp = (PGPU_RESP_EDID)buf->resp_buf;
-    PUCHAR resp_edit = (PUCHAR)(resp->edid + (ULONGLONG)id * EDID_V1_BLOCK_SIZE);
     if (resp->hdr.type != VIRTIO_GPU_RESP_OK_EDID)
     {
         DbgPrint(TRACE_LEVEL_VERBOSE, (" %s type = %x: disabled\n", __FUNCTION__, resp->hdr.type));
@@ -312,7 +311,16 @@ BOOLEAN CtrlQueue::GetEdidInfo(PGPU_VBUFFER buf, UINT id, PBYTE edid)
         return FALSE;
     }
 
-    RtlCopyMemory(edid, resp_edit, EDID_RAW_BLOCK_SIZE);
+    // Each reply holds its own scanout's EDID from edid[0].
+    ULONG size = min(resp->size, (ULONG)EDID_RAW_BLOCK_SIZE);
+    if (size < EDID_V1_BLOCK_SIZE)
+    {
+        DbgPrint(TRACE_LEVEL_VERBOSE, (" %s short edid = %d bytes\n", __FUNCTION__, resp->size));
+        return FALSE;
+    }
+
+    RtlZeroMemory(edid, EDID_RAW_BLOCK_SIZE);
+    RtlCopyMemory(edid, resp->edid, size);
     DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
 
     return TRUE;
