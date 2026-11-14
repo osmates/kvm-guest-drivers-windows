@@ -8,8 +8,9 @@ display-only driver in `viogpu` stays as it is.
 
 - Compiled for Windows 11 ARM64 with clang and lld-link through `Tools/build-macos.sh`. Not built with MSVC yet.
 - Not run in a guest yet.
-- No user-mode driver ships with it yet. Windows needs a Direct3D user-mode driver for DWM, so without one the
-  desktop stays on Basic Display.
+- The package carries Mesa's Venus Vulkan driver (`vulkan_virtio.dll`, named by `VulkanDriverName`), cross-built
+  for ARM64 with llvm-mingw. No Direct3D user-mode driver yet: Windows needs one for DWM, so without it the desktop
+  stays on Basic Display.
 
 ## Device
 
@@ -44,8 +45,8 @@ merge request 38731): the same tags and layouts.
 - Resource private data: `CREATE_RESOURCE`, and a `SUBMIT` command that the host runs before it makes the blob.
 - Submissions on virtual contexts: `SUBMIT`, `FENCE` (waits for an `EXEC_BUF` fence), `TRANSFER_TO_HOST`,
   `TRANSFER_FROM_HOST` and `NOP`.
-- Not there: hardware queues (Mesa's ICD has to be built without `HW_CONTEXT`), `RESOURCE_BUSY`, `BLIT_INIT`, guest
-  memory blobs.
+- Not there: hardware queues (the ICD then opens a context per ring; merge request 38731 alone has to be built
+  without `HW_CONTEXT`), `RESOURCE_BUSY`, `BLIT_INIT`, guest memory blobs.
 
 ## Display
 
@@ -56,7 +57,7 @@ merge request 38731): the same tags and layouts.
 
 ## Not done yet
 
-- A Direct3D user-mode driver, and the Venus ICD in the INF (`VulkanDriverName`).
+- A Direct3D user-mode driver, and a 32-bit or ARM64EC Vulkan driver for x86 and x64 apps.
 - Hardware queues and the GPU's own scheduling.
 - After a power transition the host has lost its contexts and resources; the driver does not report a lost device
   yet.
@@ -64,8 +65,12 @@ merge request 38731): the same tags and layouts.
 
 ## Building
 
-On Windows, as the other drivers (`viogpu3d.sln`). On macOS, `Tools/build-macos.sh viogpu3d/viogpu3d/viogpu3d.vcxproj`
-builds the `.sys` and a stamped INF in `viogpu3d/Install/Win11/ARM64`; the catalog is made on Windows with Inf2Cat.
+On Windows, as the other drivers (`viogpu3d.sln`), with `vulkan_virtio.dll` and `vulkan_virtio.json` put next to
+the INF before Inf2Cat; the MSBuild projects do not copy them yet. On macOS,
+`Tools/build-macos.sh --venus-icd <mesa-build>/src/virtio/vulkan viogpu3d/viogpu3d/viogpu3d.vcxproj` builds the
+`.sys` and a stamped INF in `viogpu3d/Install/Win11/ARM64`, with the Vulkan driver of a Mesa build of the
+`venus-windows` branch of github.com/osmates/mesa for `aarch64-w64-mingw32`, configured with
+`-Dvulkan-icd-dir=bin`. The catalog is made on Windows with Inf2Cat.
 
 ## Credits
 

@@ -27,6 +27,8 @@ DefaultDestDir = INX_PLATFORM_DRIVERS_DIR
 
 [SourceDisksFiles]
 viogpu3d.sys = 1,,
+vulkan_virtio.dll = 1,,
+vulkan_virtio.json = 1,,
 
 
 [Manufacturer]
@@ -41,10 +43,15 @@ viogpu3d.sys = 1,,
 [VioGpu3d_Files_Driver]
 viogpu3d.sys,,,2
 
+; Mesa's Venus Vulkan driver and its manifest.
+[VioGpu3d_Files_Vulkan]
+vulkan_virtio.dll,,,2
+vulkan_virtio.json,,,2
+
 [VioGpu3d_Inst]
 Include=msdv.inf
 FeatureScore=F9
-CopyFiles=VioGpu3d_Files_Driver
+CopyFiles=VioGpu3d_Files_Driver,VioGpu3d_Files_Vulkan
 AddReg=VioGpu3d_DeviceSettings
 
 
@@ -68,10 +75,11 @@ AddReg = VioGpu3d_EventLog_Inst.AddReg
 HKR,,EventMessageFile,%REG_EXPAND_SZ%,"%%SystemRoot%%\System32\IoLogMsg.dll"
 HKR,,TypesSupported,%REG_DWORD%,7
 
-; The user-mode drivers (a D3D UMD for UserModeDriverName, and the Venus ICD for VulkanDriverName) join this
-; section once they are built.
+; The Vulkan loader reads VulkanDriverName in the adapter's software key: the full path of the ICD's manifest. No
+; VulkanDriverNameWow, as there is no 32-bit ICD. A D3D UMD for UserModeDriverName joins once one is built.
 [VioGpu3d_DeviceSettings]
 HKR,, FlexResolution,              %REG_DWORD%, 1
+HKR,, VulkanDriverName,            %REG_MULTI_SZ%, %INX_PLATFORM_DRIVERS_DIR%\vulkan_virtio.json
 
 [VioGpu3d_PCI_MSIX]
 HKR, "Interrupt Management",, 0x00000010

@@ -27,7 +27,8 @@ usage() {
     cat <<EOF
 Usage:
   Tools/build-macos.sh fetch
-  Tools/build-macos.sh [--config "Win11 Release"|"Win10 Release"] [--test-sign] [project.vcxproj ...]
+  Tools/build-macos.sh [--config "Win11 Release"|"Win10 Release"] [--test-sign] [--venus-icd DIR]
+                       [project.vcxproj ...]
 
 fetch downloads the WDK and Windows SDK NuGet packages for ARM64 (${KIT_VERSION}) from
 nuget.org into WDK_DIR, checks each against the SHA-512 in nuget.org's catalog and unpacks it.
@@ -40,6 +41,11 @@ folders, libraries and INX. It first builds the static libraries the project lin
 lld-link, stamps DriverVer into a copy of the INX and, with Feature_PackOne, copies the .sys,
 .pdb and .inf into Install/<OS>/ARM64 as the Windows build does. Without a project it builds
 ${DEFAULT_PROJECTS[*]}.
+
+A package whose INF lists vulkan_virtio.dll (viogpu3d's) also gets Mesa's Venus Vulkan driver:
+--venus-icd names the folder of vulkan_virtio.dll and virtio_icd.aarch64.json from a Mesa build for
+aarch64-w64-mingw32 configured with -Dvulkan-icd-dir=bin (src/virtio/vulkan in its build folder).
+They go into the package as vulkan_virtio.dll and vulkan_virtio.json.
 
 --test-sign signs those .sys files with build/TestCert.pfx, a self-signed code signing
 certificate that openssl makes on first use. build/TestCert.cer is the certificate a test
@@ -58,6 +64,7 @@ Environment:
   _RHEL_RELEASE_VERSION_, _BUILD_MAJOR_VERSION_, _BUILD_MINOR_VERSION_
                      driver version parts, as with MSBuild (defaults from build/Driver.RHEL.props)
   TEST_CERT_SUBJECT  subject of a new test certificate (default: /CN=OSMates GPU Test)
+  VENUS_ICD_DIR      the folder --venus-icd names
 
 Left for Windows:
   tracewpp           no WPP: a project whose WPP configuration is DbgPrint(LEVEL, (MSG, ...))
@@ -387,6 +394,46 @@ stamp_inf() {
         die "${inx}: stampinf tokens this script does not fill"
 }
 
+# The file names an INF's [SourceDisksFiles] sections list.
+inf_source_files() {
+    tr -d '\r' <"$1" | awk '
+        /^[ \t]*\[/ { section = tolower($0); next }
+        section ~ /^[ \t]*\[sourcedisksfiles(\.[^]]*)?\]/ && $0 !~ /^[ \t]*(;|$)/ {
+            name = $0
+            sub(/[ \t]*=.*/, "", name)
+            sub(/^[ \t]*/, "", name)
+            print name
+        }'
+}
+
+# Mesa writes .\vulkan_virtio.dll as library_path when configured with -Dvulkan-icd-dir=bin: the DLL next to the
+# manifest, which is how the package installs them.
+pack_venus_icd() {
+    local pack=$1 dll manifest
+    [[ -n "${VENUS_ICD_DIR:-}" ]] ||
+        die "${PROJ}: its INF ships the Venus Vulkan driver; pass --venus-icd with the folder of Mesa's vulkan_virtio.dll"
+    dll="${VENUS_ICD_DIR}/vulkan_virtio.dll"
+    manifest="${VENUS_ICD_DIR}/virtio_icd.aarch64.json"
+    [[ -f "${dll}" && -f "${manifest}" ]] || die "no vulkan_virtio.dll and virtio_icd.aarch64.json in ${VENUS_ICD_DIR}"
+    "$(llvm_tool llvm-objdump)" -f "${dll}" | grep -q 'file format coff-arm64' || die "${dll} is not an ARM64 DLL"
+    tr -d '\r' <"${manifest}" | grep -q '"library_path": *"\.\\\\vulkan_virtio\.dll"' ||
+        die "${manifest}: library_path is not .\\vulkan_virtio.dll; configure Mesa with -Dvulkan-icd-dir=bin"
+    cp "${dll}" "${pack}/vulkan_virtio.dll"
+    cp "${manifest}" "${pack}/vulkan_virtio.json"
+    note "packed the Venus Vulkan driver of ${VENUS_ICD_DIR}"
+}
+
+# Files of a package that come from other builds, then a check that the package has every file its INF lists.
+pack_inf_files() {
+    local pack=$1 inf=$2 file
+    if inf_source_files "${inf}" | grep -q -x -i 'vulkan_virtio\.dll'; then
+        pack_venus_icd "${pack}"
+    fi
+    while IFS= read -r file; do
+        [[ -f "${pack}/${file}" ]] || die "$(basename "${inf}") lists ${file}, which the package lacks"
+    done < <(inf_source_files "${inf}")
+}
+
 build_project() {
     local PROJ PROJ_DIR
     [[ -f "$1" ]] || die "no project $1"
@@ -531,6 +578,7 @@ build_project() {
         rm -rf "${pack}"
         mkdir -p "${pack}"
         cp "${sys}" "${OUTDIR}/${target_name}.pdb" "${inf}" "${pack}/"
+        pack_inf_files "${pack}" "${pack}/$(basename "${inf}")"
         PACKAGES+=("${pack}")
     fi
     note "built ${sys#"${REPO}"/}${pack:+, packed in ${pack#"${REPO}"/}}"
@@ -595,6 +643,10 @@ main() {
                 shift
                 ;;
             --test-sign) sign=true ;;
+            --venus-icd)
+                VENUS_ICD_DIR=${2:?}
+                shift
+                ;;
             -h | --help)
                 usage
                 return
