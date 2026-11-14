@@ -88,6 +88,11 @@
 // OSMates' own, not merge request 38731's: VIOGPU3D_SURFACE, which tells a process that opens an allocation what it is.
 #define VIOGPU3D_SURFACE_MAGIC                      0x55443356u
 
+// OSMates' own: a VIRTIO_WDDM_CREATE_ALLOCATION whose Base carries only this tag is an allocation that names no
+// memory, for the Direct3D 12 runtime's residency calls on heaps and resources. No host resource; no present, lock,
+// map or open takes it.
+#define VIOGPU3D_ALLOCATE_EMPTY_TAG                 6075440857215092566ull
+
 #define VIOGPU3D_SURFACE_SHARED_TEXTURE             1u
 // The shared primary and GDI textures, blobs of the kernel driver's own Venus context.
 #define VIOGPU3D_SURFACE_KERNEL_BLOB                2u

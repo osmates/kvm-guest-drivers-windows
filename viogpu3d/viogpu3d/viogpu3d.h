@@ -127,6 +127,8 @@ enum VIOGPU3D_ALLOCATION_KIND
     VIOGPU3D_ALLOCATION_3D,
     // Shadow and staging surfaces: only the present reads them, so no host resource.
     VIOGPU3D_ALLOCATION_CPU,
+    // VIOGPU3D_ALLOCATE_EMPTY_TAG: a page of aperture and nothing else.
+    VIOGPU3D_ALLOCATION_EMPTY,
 };
 
 struct VIOGPU3D_CPU_VIEW

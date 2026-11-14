@@ -235,6 +235,10 @@ NTSTATUS VioGpu3dAllocation::Init(_Inout_ DXGK_ALLOCATIONINFO *pInfo,
 
     switch (m_Info.Base.Tag)
     {
+        case VIOGPU3D_ALLOCATE_EMPTY_TAG:
+            m_Kind = VIOGPU3D_ALLOCATION_EMPTY;
+            pInfo->Size = PAGE_SIZE;
+            return STATUS_SUCCESS;
         case VIRTIO_WDDM_ALLOCATE_BLOB_TAG:
             {
                 VIRTIO_WDDM_ALLOCATE_BLOB *pBlob = &m_Info.Base.Blob;
@@ -441,6 +445,10 @@ NTSTATUS VioGpu3dAllocation::CreateOnHost(_In_ VioGpu3dDevice *pDevice)
 {
     PAGED_CODE();
 
+    if (m_Kind == VIOGPU3D_ALLOCATION_EMPTY)
+    {
+        return STATUS_SUCCESS;
+    }
     if (m_Kind != VIOGPU3D_ALLOCATION_BLOB || m_KernelSurface)
     {
         return Open(pDevice);
@@ -486,6 +494,11 @@ NTSTATUS VioGpu3dAllocation::Open(_In_ VioGpu3dDevice *pDevice)
 {
     PAGED_CODE();
 
+    // Nothing to share: only its creator holds it.
+    if (m_Kind == VIOGPU3D_ALLOCATION_EMPTY)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
     if (m_Created && pDevice->GetCtxId() != 0)
     {
         m_pAdapter->ctrlQueue.AttachResourceToContext(pDevice->GetCtxId(), m_ResId, TRUE);
