@@ -20,6 +20,10 @@ PnpLockdown     = 1
 
 [DestinationDirs]
 DefaultDestDir = INX_PLATFORM_DRIVERS_DIR
+; The user-mode drivers run from the driver store in both packages: the D3D runtimes and the Vulkan loader load them
+; by the full paths below, and WOW64 does not redirect the driver store for x86 processes.
+VioGpu3d_Files_UserMode = 13
+VioGpu3d_Files_Vulkan = 13
 
 
 [SourceDisksNames]
@@ -92,17 +96,16 @@ HKR,,TypesSupported,%REG_DWORD%,7
 
 ; The D3D runtimes read UserModeDriverName in the order D3D9, D3D10, D3D11, D3D12; the one driver fills every slot.
 ; x64 processes load the ARM64EC view of the same ARM64X DLL. x86 processes read UserModeDriverNameWow, in the same
-; order. The runtime looks for these bare names in the driver store, where the Win11 package installs them (DIRID 13).
-; The Win10 package installs them in System32\drivers (DIRID 12), where the runtime does not look: the Direct3D
-; drivers work in the Win11 package only. Their file versions are DriverVer's. The Vulkan loader reads
+; order. A driver that runs from the driver store names its DLLs there by full path (%13%), on Windows 10 1607 and
+; later; Windows 10 on Arm64 began with 1709. Their file versions are DriverVer's. The Vulkan loader reads
 ; VulkanDriverName in the adapter's software key, or VulkanDriverNameWow in an x86 process: the full path of the ICD's
 ; manifest.
 [VioGpu3d_DeviceSettings]
 HKR,, FlexResolution,              %REG_DWORD%, 1
-HKR,, UserModeDriverName,          %REG_MULTI_SZ%, viogpu3d_umd.dll, viogpu3d_umd.dll, viogpu3d_umd.dll, viogpu3d_umd.dll
-HKR,, UserModeDriverNameWow,       %REG_MULTI_SZ%, viogpu3d_umd_x86.dll, viogpu3d_umd_x86.dll, viogpu3d_umd_x86.dll, viogpu3d_umd_x86.dll
-HKR,, VulkanDriverName,            %REG_MULTI_SZ%, %INX_PLATFORM_DRIVERS_DIR%\vulkan_virtio.json
-HKR,, VulkanDriverNameWow,         %REG_MULTI_SZ%, %INX_PLATFORM_DRIVERS_DIR%\vulkan_virtio_x86.json
+HKR,, UserModeDriverName,          %REG_MULTI_SZ%, %13%\viogpu3d_umd.dll, %13%\viogpu3d_umd.dll, %13%\viogpu3d_umd.dll, %13%\viogpu3d_umd.dll
+HKR,, UserModeDriverNameWow,       %REG_MULTI_SZ%, %13%\viogpu3d_umd_x86.dll, %13%\viogpu3d_umd_x86.dll, %13%\viogpu3d_umd_x86.dll, %13%\viogpu3d_umd_x86.dll
+HKR,, VulkanDriverName,            %REG_MULTI_SZ%, %13%\vulkan_virtio.json
+HKR,, VulkanDriverNameWow,         %REG_MULTI_SZ%, %13%\vulkan_virtio_x86.json
 
 [VioGpu3d_PCI_MSIX]
 HKR, "Interrupt Management",, 0x00000010

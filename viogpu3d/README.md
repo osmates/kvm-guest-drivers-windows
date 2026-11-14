@@ -80,8 +80,7 @@ merge request 38731): the same tags and layouts.
 ## Not done yet
 
 - A run of the Direct3D user-mode driver in Windows, for ARM64, x64 and x86 apps; its D3D12 and D3D9 DDIs.
-- A run of the surfaces above and the present's blts in Windows. On OSMates' host a Venus context cannot yet import
-  another's shared memory: its render server has to learn that first.
+- A run of the surfaces above and the present's blts in Windows, with another process importing them through Venus.
 - Hardware queues and the GPU's own scheduling.
 - After a power transition the host has lost its contexts and resources; the driver does not report a lost device
   yet.

@@ -5,8 +5,10 @@
 #
 # The folder is Install/<OS>/ARM64 as Tools/build-macos.sh packs it, with the stamped viogpu3d.inf. Checks:
 # - the INF lists every file of the package and the package has every file the INF lists;
-# - UserModeDriverName names the ARM64X driver and UserModeDriverNameWow the x86 driver, each in its four slots;
-#   VulkanDriverName and VulkanDriverNameWow name the two manifests, whose library_path is the DLL beside them;
+# - the INF copies the Direct3D and Vulkan drivers, their manifests and the notices into the driver store (DIRID 13);
+# - UserModeDriverName names the ARM64X driver and UserModeDriverNameWow the x86 driver there, by full path (%13%),
+#   each in its four slots; VulkanDriverName and VulkanDriverNameWow name the two manifests there, whose library_path
+#   is the DLL beside them;
 # - viogpu3d_umd.dll and vulkan_virtio.dll are ARM64X, with a native and an ARM64EC view; viogpu3d_umd_x86.dll and
 #   vulkan_virtio_x86.dll are x86;
 # - each view of each Direct3D driver exports OpenAdapter10_2 only, by that name (undecorated on x86, where the
@@ -91,6 +93,42 @@ for file in $UMD $UMD_X86 $ICD $ICD_X86 $NOTICES vulkan_virtio.json vulkan_virti
     echo "$inf_files" | grep -q -x -F "$file" || fail "the INF does not list $file"
 done
 
+# "<file> <dirid>[,<subdir>]" for every file a CopyFiles directive copies, from [DestinationDirs].
+destinations=$(printf '%s\n' "$inf" | python3 -I -c '
+import sys
+
+sections, name = {}, None
+for line in sys.stdin:
+    line = line.split(";", 1)[0].strip()
+    if line.startswith("[") and line.endswith("]"):
+        name = line[1:-1].strip().lower()
+        sections.setdefault(name, [])
+    elif line and name is not None:
+        sections[name].append(line)
+
+dirs = {}
+for line in sections.get("destinationdirs", []):
+    key, _, value = line.partition("=")
+    dirs[key.strip().lower()] = ",".join(v.strip() for v in value.split(","))
+default = dirs.get("defaultdestdir", "")
+for lines in sections.values():
+    for line in lines:
+        key, _, value = line.partition("=")
+        if key.strip().lower() != "copyfiles":
+            continue
+        for entry in (e.strip() for e in value.split(",")):
+            if entry.startswith("@"):
+                print(entry[1:].lower(), default)
+            else:
+                for file in sections.get(entry.lower(), []):
+                    print(file.split(",", 1)[0].strip().lower(), dirs.get(entry.lower(), default))
+')
+for file in $UMD $UMD_X86 $ICD $ICD_X86 vulkan_virtio.json vulkan_virtio_x86.json $NOTICES; do
+    dirid=$(printf '%s\n' "$destinations" | awk -v f="$file" '$1 == f { print $2 }' | sort -u | paste -sd ' ' -)
+    [ "$dirid" = 13 ] && pass "the INF copies $file into the driver store" ||
+        fail "the INF copies $file to '$dirid', not the driver store (13)"
+done
+
 # The values of an HKR,,<name>,<type>,... line: the type, then the data.
 reg_value() {
     printf '%s\n' "$inf" | awk -F, -v name="$(echo "$1" | tr '[:upper:]' '[:lower:]')" '
@@ -106,20 +144,20 @@ for pair in "UserModeDriverName $UMD" "UserModeDriverNameWow $UMD_X86"; do
     set -- $pair
     value=$(reg_value "$1")
     lower=$(printf '%s\n' "$value" | tr '[:upper:]' '[:lower:]')
-    if [ "$lower" = "%reg_multi_sz% $2 $2 $2 $2" ] || [ "$lower" = "0x00010000 $2 $2 $2 $2" ]; then
-        pass "$1 is $2 in the D3D9, D3D10, D3D11 and D3D12 slots"
+    path="%13%\\$2"
+    if [ "$lower" = "%reg_multi_sz% $path $path $path $path" ] || [ "$lower" = "0x00010000 $path $path $path $path" ]; then
+        pass "$1 is $path in the D3D9, D3D10, D3D11 and D3D12 slots"
     else
-        fail "$1 is '$value', not $2 four times as REG_MULTI_SZ"
+        fail "$1 is '$value', not $path four times as REG_MULTI_SZ"
     fi
 done
 
 for pair in "VulkanDriverName vulkan_virtio.json $ICD" "VulkanDriverNameWow vulkan_virtio_x86.json $ICD_X86"; do
     set -- $pair
     value=$(reg_value "$1")
-    manifest=$(printf '%s\n' "$value" | awk '{ print $NF }' | sed 's#.*\\##')
-    if [ "$(printf '%s\n' "$manifest" | tr '[:upper:]' '[:lower:]')" != "$2" ] ||
-        [ "$(printf '%s\n' "$value" | awk '{ print NF }')" != 2 ]; then
-        fail "$1 is '$value', not the path of $2"
+    manifest=$(printf '%s\n' "$value" | awk '{ print $NF }' | tr '[:upper:]' '[:lower:]')
+    if [ "$manifest" != "%13%\\$2" ] || [ "$(printf '%s\n' "$value" | awk '{ print NF }')" != 2 ]; then
+        fail "$1 is '$value', not the path of $2 in the driver store (%13%)"
     elif ! tr -d '\r' <"$PACK/$2" | grep -q "\"library_path\": *\"\\.\\\\\\\\$(echo "$3" | sed 's/\./\\./g')\""; then
         fail "$2's library_path is not .\\$3"
     else
