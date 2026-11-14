@@ -1,0 +1,4 @@
+[submodule "viogpu3d/umd/dxvk"]
+	path = viogpu3d/umd/dxvk
+	url = https://github.com/anonymix007/dxvk.git
+	branch = umd

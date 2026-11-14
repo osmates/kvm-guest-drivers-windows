@@ -1,0 +1,3 @@
+LIBRARY viogpu3d_umd.dll
+EXPORTS
+    OpenAdapter10_2
