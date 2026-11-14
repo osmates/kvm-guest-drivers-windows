@@ -1,0 +1,33 @@
+// Copyright (C) 2026 OSMates contributors
+// SPDX-License-Identifier: BSD-3-Clause
+
+// The version resource the package build links into Mesa's Venus Vulkan drivers, which have none. The build passes the
+// defines it passes for viogpu3d.sys, so the file version is the INF's DriverVer version, and VIOGPU3D_ICD_X86 for
+// the x86 driver.
+#include <windows.h>
+#include <ntverp.h>
+
+#include "../../build/vendor.ver"
+
+#undef  VER_FILEDESCRIPTION_STR
+#undef  VER_INTERNALNAME_STR
+#undef  VER_FILETYPE
+#undef  VER_FILESUBTYPE
+#undef  VER_LEGALCOPYRIGHT_STR
+
+#define VER_FILETYPE               VFT_DLL
+#define VER_FILESUBTYPE            VFT2_UNKNOWN
+
+#define VENDOR_VIRTIO_PRODUCT      VENDOR_PRODUCT_PREFIX "VIOGPU WDDM 3D"
+#define VER_FILEDESCRIPTION_STR    VENDOR_DESC_PREFIX "VIOGPU WDDM 3D Vulkan driver (Mesa Venus)" VENDOR_DESC_POSTFIX
+// Mesa's code, not the vendor's.
+#define VER_LEGALCOPYRIGHT_STR     "Mesa contributors, see viogpu3d_umd_notices.txt"
+#ifdef VIOGPU3D_ICD_X86
+#define VER_INTERNALNAME_STR       "vulkan_virtio_x86.dll"
+#else
+#define VER_INTERNALNAME_STR       "vulkan_virtio.dll"
+#endif
+
+LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
+
+#include "common.ver"

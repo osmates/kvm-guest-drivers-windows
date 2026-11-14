@@ -263,24 +263,53 @@ HRESULT APIENTRY tritonRetrieveShaderComment(D3D10DDI_HDEVICE, D3D10DDI_HSHADER,
                                              WCHAR *, SIZE_T *);
 
 
-/* ---------- Per-return-type stub helpers ----------
+/* ---------- Stubs ----------
  *
- * x64 Windows uses a single calling convention and unused parameters
- * cost nothing, so a single stub per return type is installed via cast
- * into every PFND3D... slot of the device function table. TR_STUB logs
- * the slot once per process. */
+ * One stub per slot type, taking that slot's parameters: on x86 the
+ * callee pops its arguments (stdcall), so one stub cast into slots of
+ * other types would unbalance the caller's stack. TR_STUB logs each
+ * slot once per process. */
 
-static void APIENTRY tritonStubVoid(D3D10DDI_HDEVICE hDevice)
-{
-    (void)hDevice;
-    TR_STUB("Triton<void> stub");
-}
+#define TR_DECL_STUB(name, ...)                                       \
+    static void APIENTRY tritonStub##name(D3D10DDI_HDEVICE hDevice,   \
+                                          __VA_ARGS__)                \
+    {                                                                 \
+        (void)hDevice;                                                \
+        TR_STUB(#name);                                               \
+    }
 
-/* GCC's -Wcast-function-type is unhelpful for stub-table population. */
+TR_DECL_STUB(Relocate11, struct D3D11DDI_DEVICEFUNCS *pFuncs)
+TR_DECL_STUB(RelocateWDDM1_3, struct D3DWDDM1_3DDI_DEVICEFUNCS *pFuncs)
+TR_DECL_STUB(RelocateWDDM2_0, struct D3DWDDM2_0DDI_DEVICEFUNCS *pFuncs)
+TR_DECL_STUB(RelocateWDDM2_1, struct D3DWDDM2_1DDI_DEVICEFUNCS *pFuncs)
+TR_DECL_STUB(RelocateWDDM2_2, struct D3DWDDM2_2DDI_DEVICEFUNCS *pFuncs)
+TR_DECL_STUB(SetTextFilterSize, UINT Width, UINT Height)
+TR_DECL_STUB(UpdateTileMappings, D3D10DDI_HRESOURCE hTiledResource, UINT NumTiledResourceRegions,
+             const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *pTiledResourceRegionStartCoords,
+             const D3DWDDM1_3DDI_TILE_REGION_SIZE *pTiledResourceRegionSizes, D3D10DDI_HRESOURCE hTilePool,
+             UINT NumRanges, const UINT *pRangeFlags, const UINT *pTilePoolStartOffsets,
+             const UINT *pRangeTileCounts, UINT Flags)
+TR_DECL_STUB(CopyTileMappings, D3D10DDI_HRESOURCE hDestTiledResource,
+             const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *pDestRegionStartCoord,
+             D3D10DDI_HRESOURCE hSourceTiledResource,
+             const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *pSourceRegionStartCoord,
+             const D3DWDDM1_3DDI_TILE_REGION_SIZE *pTileRegionSize, UINT Flags)
+TR_DECL_STUB(CopyTiles, D3D10DDI_HRESOURCE hTiledResource,
+             const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *pTileRegionStartCoord,
+             const D3DWDDM1_3DDI_TILE_REGION_SIZE *pTileRegionSize, D3D10DDI_HRESOURCE hBuffer,
+             UINT64 BufferStartOffsetInBytes, UINT Flags)
+TR_DECL_STUB(UpdateTiles, D3D10DDI_HRESOURCE hDestTiledResource,
+             const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *pDestTileRegionStartCoord,
+             const D3DWDDM1_3DDI_TILE_REGION_SIZE *pDestTileRegionSize, const VOID *pSourceTileData, UINT Flags)
+TR_DECL_STUB(TiledResourceBarrier, D3D11DDI_HANDLETYPE TiledResourceAccessBeforeBarrierHandleType,
+             VOID *hTiledResourceAccessBeforeBarrier, D3D11DDI_HANDLETYPE TiledResourceAccessAfterBarrierHandleType,
+             VOID *hTiledResourceAccessAfterBarrier)
+TR_DECL_STUB(ResizeTilePool, D3D10DDI_HRESOURCE hTilePool, UINT64 NewSizeInBytes)
+
+/* GCC's -Wcast-function-type is unhelpful for the shader slots, whose
+ * D3D10 and D3D11.1 types differ only in pointer types. */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wcast-function-type"
-
-#define TR_STUB_V    ((void *)tritonStubVoid)
 
 static void APIENTRY tritonDestroyDevice(D3D10DDI_HDEVICE hDevice);
 
@@ -348,7 +377,7 @@ static void tritonFillD3D11DeviceFuncs(D3D11DDI_DEVICEFUNCS *p)
     p->pfnResourceMap                               = tritonResourceMap;
     p->pfnResourceUnmap                             = tritonResourceUnmap;
     p->pfnResourceIsStagingBusy                     = tritonResourceIsStagingBusy;
-    p->pfnRelocateDeviceFuncs                       = (PFND3D11DDI_RELOCATEDEVICEFUNCS)TR_STUB_V;
+    p->pfnRelocateDeviceFuncs                       = tritonStubRelocate11;
     p->pfnCalcPrivateResourceSize                   = tritonCalcPrivateResourceSize;
     p->pfnCalcPrivateOpenedResourceSize             = tritonCalcPrivateOpenedResourceSize;
     p->pfnCreateResource                            = tritonCreateResource;
@@ -399,7 +428,7 @@ static void tritonFillD3D11DeviceFuncs(D3D11DDI_DEVICEFUNCS *p)
     p->pfnCheckCounter                              = tritonCheckCounter;
 
     p->pfnDestroyDevice                             = tritonDestroyDevice;
-    p->pfnSetTextFilterSize                         = (PFND3D10DDI_SETTEXTFILTERSIZE)TR_STUB_V;
+    p->pfnSetTextFilterSize                         = tritonStubSetTextFilterSize;
 
     /* 10.1 entries */
     /* The runtime routes copies between a packed or block-compressed format
@@ -514,16 +543,16 @@ static void tritonFillWDDM1_3DeviceFuncs(D3DWDDM1_3DDI_DEVICEFUNCS *p)
 {
     tritonFillD3D11_1DeviceFuncs((D3D11_1DDI_DEVICEFUNCS *)(p));
 
-    p->pfnRelocateDeviceFuncs           = (PFND3DWDDM1_3DDI_RELOCATEDEVICEFUNCS)TR_STUB_V;
+    p->pfnRelocateDeviceFuncs           = tritonStubRelocateWDDM1_3;
     p->pfnCheckMultisampleQualityLevels = tritonCheckMultisampleQualityLevels_1_3;
 
-    p->pfnUpdateTileMappings   = (PFND3DWDDM1_3DDI_UPDATETILEMAPPINGS)TR_STUB_V;
-    p->pfnCopyTileMappings     = (PFND3DWDDM1_3DDI_COPYTILEMAPPINGS)TR_STUB_V;
-    p->pfnCopyTiles            = (PFND3DWDDM1_3DDI_COPYTILES)TR_STUB_V;
-    p->pfnUpdateTiles          = (PFND3DWDDM1_3DDI_UPDATETILES)TR_STUB_V;
-    p->pfnTiledResourceBarrier = (PFND3DWDDM1_3DDI_TILEDRESOURCEBARRIER)TR_STUB_V;
+    p->pfnUpdateTileMappings   = tritonStubUpdateTileMappings;
+    p->pfnCopyTileMappings     = tritonStubCopyTileMappings;
+    p->pfnCopyTiles            = tritonStubCopyTiles;
+    p->pfnUpdateTiles          = tritonStubUpdateTiles;
+    p->pfnTiledResourceBarrier = tritonStubTiledResourceBarrier;
     p->pfnGetMipPacking        = tritonGetMipPacking;
-    p->pfnResizeTilePool       = (PFND3DWDDM1_3DDI_RESIZETILEPOOL)TR_STUB_V;
+    p->pfnResizeTilePool       = tritonStubResizeTilePool;
     p->pfnSetMarker            = tritonSetMarker;
     p->pfnSetMarkerMode        = tritonSetMarkerMode;
 }
@@ -539,7 +568,7 @@ static void tritonFillWDDM2_0DeviceFuncs(D3DWDDM2_0DDI_DEVICEFUNCS *p)
 {
     tritonFillWDDM1_3DeviceFuncs((D3DWDDM1_3DDI_DEVICEFUNCS *)(p));
 
-    p->pfnRelocateDeviceFuncs                   = (PFND3DWDDM2_0DDI_RELOCATEDEVICEFUNCS)TR_STUB_V;
+    p->pfnRelocateDeviceFuncs                   = tritonStubRelocateWDDM2_0;
 
     p->pfnCalcPrivateShaderResourceViewSize     = tritonCalcPrivateSRVSize_WDDM2_0;
     p->pfnCreateShaderResourceView              = tritonCreateSRV_WDDM2_0;
@@ -569,7 +598,7 @@ static void tritonFillWDDM2_1DeviceFuncs(D3DWDDM2_1DDI_DEVICEFUNCS *p)
 {
     tritonFillWDDM2_0DeviceFuncs((D3DWDDM2_0DDI_DEVICEFUNCS *)(p));
 
-    p->pfnRelocateDeviceFuncs = (PFND3DWDDM2_1DDI_RELOCATEDEVICEFUNCS)TR_STUB_V;
+    p->pfnRelocateDeviceFuncs = tritonStubRelocateWDDM2_1;
     p->pfnAcquireResource     = (PFND3DWDDM2_1DDI_SYNC_TOKEN)tritonAcquireResource;
     p->pfnReleaseResource     = (PFND3DWDDM2_1DDI_SYNC_TOKEN)tritonReleaseResource;
 }
@@ -609,7 +638,7 @@ static void tritonFillWDDM2_2DeviceFuncs(D3DWDDM2_2DDI_DEVICEFUNCS *p)
 {
     tritonFillWDDM2_1DeviceFuncs((D3DWDDM2_1DDI_DEVICEFUNCS *)(p));
 
-    p->pfnRelocateDeviceFuncs = (PFND3DWDDM2_2DDI_RELOCATEDEVICEFUNCS)TR_STUB_V;
+    p->pfnRelocateDeviceFuncs = tritonStubRelocateWDDM2_2;
     p->pfnCalcPrivateShaderCacheSessionSize = tritonCalcPrivateShaderCacheSessionSize;
     p->pfnCreateShaderCacheSession          = tritonCreateShaderCacheSession;
     p->pfnDestroyShaderCacheSession         = tritonDestroyShaderCacheSession;

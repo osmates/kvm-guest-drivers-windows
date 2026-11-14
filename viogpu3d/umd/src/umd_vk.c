@@ -13,8 +13,6 @@
 // The loader-ICD interface version this driver speaks to the ICD, as the Vulkan loader would.
 #define UMD_ICD_INTERFACE_VERSION 7
 
-#define UMD_ICD_NAME              L"vulkan_virtio.dll"
-
 typedef VkResult(VKAPI_PTR *PFN_umd_icdNegotiate)(uint32_t *pSupportedVersion);
 
 static INIT_ONCE umd_icd_once = INIT_ONCE_STATIC_INIT;
@@ -31,6 +29,7 @@ static struct umd_device *umd_devices;
 
 static BOOL CALLBACK umd_icd_load(PINIT_ONCE once, PVOID param, PVOID *context)
 {
+    const WCHAR *name = umd_icd_name(UMD_X86);
     WCHAR self[MAX_PATH], path[MAX_PATH];
     PFN_umd_icdNegotiate negotiate;
     uint32_t version = UMD_ICD_INTERFACE_VERSION;
@@ -40,9 +39,9 @@ static BOOL CALLBACK umd_icd_load(PINIT_ONCE once, PVOID param, PVOID *context)
     (void)param;
     (void)context;
     length = GetModuleFileNameW(umd_module(), self, MAX_PATH);
-    if (length == 0 || length == MAX_PATH || !umd_path_beside(self, UMD_ICD_NAME, path, MAX_PATH))
+    if (length == 0 || length == MAX_PATH || !umd_path_beside(self, name, path, MAX_PATH))
     {
-        umd_log("no path for %ls beside this driver", UMD_ICD_NAME);
+        umd_log("no path for %ls beside this driver", name);
         return TRUE;
     }
     // Only its own folder and System32: the ICD imports system DLLs only.

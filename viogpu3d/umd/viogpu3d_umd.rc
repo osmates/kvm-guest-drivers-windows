@@ -1,7 +1,8 @@
 // Copyright (C) 2026 OSMates contributors
 // SPDX-License-Identifier: BSD-3-Clause
 
-// The build passes the defines it passes for viogpu3d.sys, so the file version is the INF's DriverVer version.
+// The build passes the defines it passes for viogpu3d.sys, so the file version is the INF's DriverVer version, and
+// VIOGPU3D_UMD_X86 for the x86 driver.
 #include <windows.h>
 #include <ntverp.h>
 
@@ -17,7 +18,11 @@
 
 #define VENDOR_VIRTIO_PRODUCT      VENDOR_PRODUCT_PREFIX "VIOGPU WDDM 3D"
 #define VER_FILEDESCRIPTION_STR    VENDOR_DESC_PREFIX "VIOGPU WDDM 3D Direct3D driver" VENDOR_DESC_POSTFIX
+#ifdef VIOGPU3D_UMD_X86
+#define VER_INTERNALNAME_STR       "viogpu3d_umd_x86.dll"
+#else
 #define VER_INTERNALNAME_STR       "viogpu3d_umd.dll"
+#endif
 
 LANGUAGE LANG_ENGLISH, SUBLANG_ENGLISH_US
 

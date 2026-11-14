@@ -390,6 +390,20 @@ static void icdPathIsBesideTheDriver(void)
     CHECK(!umd_path_beside(NULL, L"vulkan_virtio.dll", out, 260));
 }
 
+static void eachDriverLoadsItsOwnIcd(void)
+{
+    WCHAR out[260];
+    const WCHAR *x86 = L"C:\\Windows\\System32\\DriverStore\\FileRepository\\viogpu3d.inf_arm64_1\\"
+                       L"viogpu3d_umd_x86.dll";
+    const WCHAR *want = L"C:\\Windows\\System32\\DriverStore\\FileRepository\\viogpu3d.inf_arm64_1\\"
+                        L"vulkan_virtio_x86.dll";
+
+    CHECK(wcscmp(umd_icd_name(FALSE), L"vulkan_virtio.dll") == 0);
+    CHECK(wcscmp(umd_icd_name(TRUE), L"vulkan_virtio_x86.dll") == 0);
+    CHECK(umd_path_beside(x86, umd_icd_name(TRUE), out, 260));
+    CHECK(wcscmp(out, want) == 0);
+}
+
 int main(void)
 {
     adapterWithVenusIsTaken();
@@ -409,6 +423,7 @@ int main(void)
     aChainThatLoopsIsNotFollowed();
     prependLeavesTheCallersChain();
     icdPathIsBesideTheDriver();
+    eachDriverLoadsItsOwnIcd();
 
     printf("umd host tests: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

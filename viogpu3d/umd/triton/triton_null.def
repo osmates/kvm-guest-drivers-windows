@@ -1,3 +1,2 @@
-LIBRARY triton_null.dll
 EXPORTS
     OpenAdapter10_2

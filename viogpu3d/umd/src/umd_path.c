@@ -57,3 +57,8 @@ BOOL umd_path_beside(const WCHAR *modulePath, const WCHAR *name, WCHAR *out, siz
     }
     return TRUE;
 }
+
+const WCHAR *umd_icd_name(BOOL x86)
+{
+    return x86 ? L"vulkan_virtio_x86.dll" : L"vulkan_virtio.dll";
+}
