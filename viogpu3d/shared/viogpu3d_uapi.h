@@ -82,6 +82,32 @@
 
 #define VIRTIO_WDDM_BLOB_MAP_FLAGS_UNMAP            (1u << 0)
 
+// DRM_FORMAT_MOD_INVALID: no explicit layout for Venus to import with.
+#define VIRTIO_WDDM_MODIFIER_INVALID                0x00ffffffffffffffull
+
+// OSMates' own, not merge request 38731's: VIOGPU3D_SURFACE, which tells a process that opens an allocation what it is.
+#define VIOGPU3D_SURFACE_MAGIC                      0x55443356u
+
+#define VIOGPU3D_SURFACE_SHARED_TEXTURE             1u
+// The shared primary and GDI textures, blobs of the kernel driver's own Venus context.
+#define VIOGPU3D_SURFACE_KERNEL_BLOB                2u
+// Shadow and staging surfaces: guest memory with no host resource, which only the kernel driver's present reads.
+#define VIOGPU3D_SURFACE_KERNEL_CPU                 3u
+
+// Rows one after another, Pitch bytes apart, in one level, layer and sample.
+#define VIOGPU3D_SURFACE_FLAG_LINEAR                (1u << 0)
+
+// D3D11's values, for the descriptions the kernel driver writes; the user-mode driver checks them against d3d11.h.
+#define VIOGPU3D_DXGI_FORMAT_B8G8R8A8_UNORM         87u
+#define VIOGPU3D_DXGI_FORMAT_B8G8R8X8_UNORM         88u
+#define VIOGPU3D_D3D11_USAGE_DEFAULT                0u
+#define VIOGPU3D_D3D11_BIND_SHADER_RESOURCE         0x8u
+#define VIOGPU3D_D3D11_BIND_RENDER_TARGET           0x20u
+#define VIOGPU3D_D3D11_RESOURCE_MISC_SHARED         0x2u
+
+// Metal's linear row alignment on Apple GPUs, so that an importer's linear image has the kernel driver's pitch.
+#define VIOGPU3D_SURFACE_PITCH_ALIGNMENT            16u
+
 #pragma pack(push, 1)
 
 // DXGKQAITYPE_UMDRIVERPRIVATE.
@@ -244,6 +270,32 @@ typedef struct _VIRTIO_WDDM_SUBMIT_COMMAND
     UINT64 Tag;
 } VIRTIO_WDDM_SUBMIT_COMMAND;
 
+typedef struct _VIOGPU3D_SURFACE
+{
+    UINT32 Magic;
+    UINT32 Size;
+    UINT32 Kind;
+    UINT32 Flags;
+    // The texture's D3D11 description.
+    UINT32 Width;
+    UINT32 Height;
+    UINT32 MipLevels;
+    UINT32 ArraySize;
+    UINT32 Format;
+    UINT32 SampleCount;
+    UINT32 Usage;
+    UINT32 BindFlags;
+    UINT32 CpuAccessFlags;
+    UINT32 MiscFlags;
+    // The kernel driver's surfaces only.
+    UINT32 Pitch;
+    UINT32 StandardType;
+    UINT32 VidPnSourceId;
+    UINT32 D3dFormat;
+    // Zero again by the time any process can read the record.
+    UINT64 Cookie;
+} VIOGPU3D_SURFACE;
+
 #pragma pack(pop)
 
 C_ASSERT(sizeof(VIRTIO_WDDM_ADAPTER_INFO) == 26);
@@ -261,3 +313,5 @@ C_ASSERT(sizeof(VIRTIO_WDDM_EXEC_BUFFER) == 16);
 C_ASSERT(sizeof(VIRTIO_WDDM_COMMAND_TRANSFER) == 48);
 C_ASSERT(sizeof(VIRTIO_WDDM_COMMAND_HEADER) == 8);
 C_ASSERT(sizeof(VIRTIO_WDDM_SUBMIT_COMMAND) == 8);
+C_ASSERT(sizeof(VIOGPU3D_SURFACE) == 80);
+C_ASSERT(FIELD_OFFSET(VIOGPU3D_SURFACE, Cookie) == 72);

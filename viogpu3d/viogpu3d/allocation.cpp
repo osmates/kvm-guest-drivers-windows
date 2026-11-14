@@ -33,28 +33,11 @@
 #include "allocation.tmh"
 #endif
 
-// virgl's texture target and bind flags for the primaries and staging surfaces the runtime asks for.
-#define VIRGL_TARGET_TEXTURE_2D   2
+// virgl's bind flags, which Venus ignores: what the kernel driver's blobs are for.
 #define VIRGL_BIND_RENDER_TARGET  (1 << 1)
 #define VIRGL_BIND_SAMPLER_VIEW   (1 << 3)
 #define VIRGL_BIND_DISPLAY_TARGET (1 << 7)
 #define VIRGL_BIND_SCANOUT        (1 << 18)
-
-#define VIOGPU3D_STANDARD_MAGIC   0x56334453u
-
-// Follows VIRTIO_WDDM_CREATE_ALLOCATION for the standard allocations this driver describes itself.
-#pragma pack(push, 1)
-typedef struct _VIOGPU3D_STANDARD_ALLOCATION
-{
-    UINT32 Magic;
-    UINT32 Type;
-    UINT32 Width;
-    UINT32 Height;
-    UINT32 Pitch;
-    UINT32 Format;
-    UINT32 VidPnSourceId;
-} VIOGPU3D_STANDARD_ALLOCATION;
-#pragma pack(pop)
 
 static ULONGLONG AlignUp(ULONGLONG value, ULONGLONG alignment)
 {
@@ -171,17 +154,23 @@ VioGpu3dAllocation::VioGpu3dAllocation(VioGpu3dAdapter *adapter)
     m_CreatorCtxId = 0;
     m_pPrelude = NULL;
     m_PreludeSize = 0;
+    m_KernelSurface = FALSE;
+    m_StandardType = 0;
     m_Primary = FALSE;
     m_Width = 0;
     m_Height = 0;
     m_Pitch = 0;
     m_Format = D3DDDIFMT_A8R8G8B8;
     m_Backed = FALSE;
+    m_pApertureMdl = NULL;
+    m_ApertureMdlOffset = 0;
     KeInitializeEvent(&m_MapLock, SynchronizationEvent, TRUE);
     m_HostMapped = FALSE;
     m_RegionOffset = 0;
     m_RegionSize = 0;
     m_CacheType = MmCached;
+    m_pKernelVa = NULL;
+    m_pRegionMdl = NULL;
     InitializeListHead(&m_UserMappings);
 }
 
@@ -218,16 +207,6 @@ NTSTATUS VioGpu3dAllocation::Init(_Inout_ DXGK_ALLOCATIONINFO *pInfo,
     VIRTIO_WDDM_CREATE_ALLOCATION *pCreate = (VIRTIO_WDDM_CREATE_ALLOCATION *)pInfo->pPrivateDriverData;
     m_Info = *pCreate;
 
-    const VIOGPU3D_STANDARD_ALLOCATION *pStandard = NULL;
-    if (pInfo->PrivateDriverDataSize >= sizeof(VIRTIO_WDDM_CREATE_ALLOCATION) + sizeof(VIOGPU3D_STANDARD_ALLOCATION))
-    {
-        pStandard = (const VIOGPU3D_STANDARD_ALLOCATION *)(pCreate + 1);
-        if (pStandard->Magic != VIOGPU3D_STANDARD_MAGIC)
-        {
-            pStandard = NULL;
-        }
-    }
-
     RtlZeroMemory(&pInfo->FlagsWddm2, sizeof(pInfo->FlagsWddm2));
     pInfo->Alignment = 0;
     pInfo->PreferredSegment.Value = 0;
@@ -239,6 +218,20 @@ NTSTATUS VioGpu3dAllocation::Init(_Inout_ DXGK_ALLOCATIONINFO *pInfo,
     pInfo->pAllocationUsageHint = NULL;
     pInfo->AllocationPriority = D3DDDI_ALLOCATIONPRIORITY_NORMAL;
     pInfo->hAllocation = this;
+
+    // Only GetStandardAllocationDriverData knows the mark, so no process can claim a kernel surface.
+    if (pInfo->PrivateDriverDataSize >= sizeof(VIRTIO_WDDM_CREATE_ALLOCATION) + sizeof(VIOGPU3D_SURFACE))
+    {
+        VIOGPU3D_SURFACE *pSurface = (VIOGPU3D_SURFACE *)(pCreate + 1);
+        if (pSurface->Magic == VIOGPU3D_SURFACE_MAGIC && pSurface->Size == sizeof(VIOGPU3D_SURFACE) &&
+            (pSurface->Kind == VIOGPU3D_SURFACE_KERNEL_BLOB || pSurface->Kind == VIOGPU3D_SURFACE_KERNEL_CPU) &&
+            pSurface->Cookie == m_pAdapter->GetSurfaceCookie())
+        {
+            // Processes that open the allocation read this record.
+            pSurface->Cookie = 0;
+            return InitKernelSurface(pInfo, pCreate, pSurface);
+        }
+    }
 
     switch (m_Info.Base.Tag)
     {
@@ -294,13 +287,6 @@ NTSTATUS VioGpu3dAllocation::Init(_Inout_ DXGK_ALLOCATIONINFO *pInfo,
                 m_Width = p3d->Width;
                 m_Height = p3d->Height;
                 m_Pitch = m_Width * 4;
-                if (pStandard != NULL)
-                {
-                    m_Pitch = pStandard->Pitch;
-                    m_Format = (D3DDDIFORMAT)pStandard->Format;
-                    m_Primary = pStandard->Type == D3DKMDT_STANDARDALLOCATION_SHAREDPRIMARYSURFACE;
-                    pInfo->FlagsWddm2.CpuVisible = 1;
-                }
                 pInfo->Size = (SIZE_T)AlignUp(p3d->Size, PAGE_SIZE);
                 break;
             }
@@ -342,6 +328,82 @@ NTSTATUS VioGpu3dAllocation::Init(_Inout_ DXGK_ALLOCATIONINFO *pInfo,
     return STATUS_SUCCESS;
 }
 
+NTSTATUS VioGpu3dAllocation::InitKernelSurface(_Inout_ DXGK_ALLOCATIONINFO *pInfo,
+                                               _Inout_ VIRTIO_WDDM_CREATE_ALLOCATION *pCreate,
+                                               _In_ const VIOGPU3D_SURFACE *pSurface)
+{
+    PAGED_CODE();
+
+    if (pSurface->Width == 0 || pSurface->Height == 0 || pSurface->Width > VIOGPU3D_MAX_DISPLAY_SIDE ||
+        pSurface->Height > VIOGPU3D_MAX_DISPLAY_SIDE || pSurface->Pitch < pSurface->Width * 4 ||
+        pSurface->Pitch % 4 != 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+    m_KernelSurface = TRUE;
+    m_StandardType = pSurface->StandardType;
+    m_Primary = pSurface->StandardType == D3DKMDT_STANDARDALLOCATION_SHAREDPRIMARYSURFACE;
+    m_Width = pSurface->Width;
+    m_Height = pSurface->Height;
+    m_Pitch = pSurface->Pitch;
+    m_Format = (D3DDDIFORMAT)pSurface->D3dFormat;
+    ULONGLONG bytes = (ULONGLONG)m_Pitch * m_Height;
+
+    if (pSurface->Kind == VIOGPU3D_SURFACE_KERNEL_CPU)
+    {
+        m_Kind = VIOGPU3D_ALLOCATION_CPU;
+        pInfo->FlagsWddm2.CpuVisible = 1;
+        pInfo->Size = (SIZE_T)AlignUp(bytes, PAGE_SIZE);
+        return STATUS_SUCCESS;
+    }
+
+    VIRTIO_WDDM_ALLOCATE_BLOB *pBlob = &m_Info.Base.Blob;
+    // No process's device makes these, and every process imports them.
+    UINT ctxId = m_pAdapter->GetOwnCtxId();
+    if (ctxId == 0 || m_Info.Base.Tag != VIRTIO_WDDM_ALLOCATE_BLOB_TAG || pBlob->Size < bytes ||
+        pBlob->Size % m_pAdapter->GetBlobAlignment() != 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+    m_Kind = VIOGPU3D_ALLOCATION_BLOB;
+    pInfo->Size = PAGE_SIZE;
+    m_ResId = m_pAdapter->resourceIdr.GetId();
+    if (m_ResId == 0)
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    m_Info.ResId = m_ResId;
+    pCreate->ResId = m_ResId;
+
+    // Blob id 0 and only MAPPABLE: Venus' renderer makes plain shared memory, with no Vulkan object in the context.
+    UINT reply = m_pAdapter->ctrlQueue.CreateBlob(ctxId,
+                                                  m_ResId,
+                                                  VIRTIO_GPU_BLOB_MEM_HOST3D,
+                                                  VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE,
+                                                  0,
+                                                  pBlob->Size,
+                                                  NULL,
+                                                  0);
+    if (reply != VIRTIO_GPU_RESP_OK_NODATA)
+    {
+        DbgPrint(TRACE_LEVEL_ERROR,
+                 ("%s surface of type %u refused with %x\n", __FUNCTION__, pSurface->StandardType, reply));
+        return STATUS_UNSUCCESSFUL;
+    }
+    m_Created = TRUE;
+    m_CreatorCtxId = ctxId;
+
+    // A full region fails the creation here, not a present later.
+    LockMap(&m_MapLock);
+    NTSTATUS status = HostMapLocked();
+    UnlockMap(&m_MapLock);
+    if (!NT_SUCCESS(status))
+    {
+        DbgPrint(TRACE_LEVEL_ERROR, ("%s surface blob %u not mapped: %x\n", __FUNCTION__, m_ResId, status));
+    }
+    return status;
+}
+
 // The command a resource's private data carried, which the host runs before it exports the blob.
 NTSTATUS VioGpu3dAllocation::SendPrelude(_In_ VioGpu3dDevice *pDevice)
 {
@@ -379,7 +441,7 @@ NTSTATUS VioGpu3dAllocation::CreateOnHost(_In_ VioGpu3dDevice *pDevice)
 {
     PAGED_CODE();
 
-    if (m_Kind != VIOGPU3D_ALLOCATION_BLOB)
+    if (m_Kind != VIOGPU3D_ALLOCATION_BLOB || m_KernelSurface)
     {
         return Open(pDevice);
     }
@@ -444,8 +506,7 @@ void VioGpu3dAllocation::Close(_In_ VioGpu3dDevice *pDevice)
         p = p->Flink;
         if (pMapping->Process == pDevice->GetProcess() && pMapping->Process == PsGetCurrentProcess())
         {
-            m_pAdapter->GetDxgkInterface()->DxgkCbUnmapMemory(m_pAdapter->GetDxgkInterface()->DeviceHandle,
-                                                              pMapping->Address);
+            UnmapViewLocked(pMapping);
             RemoveEntryList(&pMapping->Link);
             delete pMapping;
         }
@@ -458,6 +519,143 @@ void VioGpu3dAllocation::Close(_In_ VioGpu3dDevice *pDevice)
     }
 }
 
+NTSTATUS VioGpu3dAllocation::HostMapLocked()
+{
+    PAGED_CODE();
+
+    if (m_HostMapped)
+    {
+        return STATUS_SUCCESS;
+    }
+    VioGpu3dHostVisible *pRegion = m_pAdapter->GetHostVisible();
+    ULONGLONG size = m_Info.Base.Blob.Size;
+    ULONGLONG offset = 0;
+    NTSTATUS status = pRegion->Allocate(size, &offset);
+    if (!NT_SUCCESS(status))
+    {
+        return status;
+    }
+    switch (m_pAdapter->ctrlQueue.MapBlob(m_CreatorCtxId, m_ResId, offset))
+    {
+        case VIRTIO_GPU_MAP_CACHE_CACHED:
+            m_CacheType = MmCached;
+            break;
+        case VIRTIO_GPU_MAP_CACHE_WC:
+            m_CacheType = MmWriteCombined;
+            break;
+        case VIRTIO_GPU_MAP_CACHE_UNCACHED:
+            m_CacheType = MmNonCached;
+            break;
+        default:
+            pRegion->Free(offset, size);
+            return STATUS_UNSUCCESSFUL;
+    }
+    m_HostMapped = TRUE;
+    m_RegionOffset = offset;
+    m_RegionSize = size;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS VioGpu3dAllocation::SystemViewLocked()
+{
+    PAGED_CODE();
+
+    if (m_pKernelVa != NULL)
+    {
+        return STATUS_SUCCESS;
+    }
+    ULONG protect = PAGE_READWRITE;
+    if (m_CacheType == MmWriteCombined)
+    {
+        protect |= PAGE_WRITECOMBINE;
+    }
+    else if (m_CacheType == MmNonCached)
+    {
+        protect |= PAGE_NOCACHE;
+    }
+    PHYSICAL_ADDRESS pa = m_pAdapter->GetHostVisible()->GetBase();
+    pa.QuadPart += m_RegionOffset;
+    m_pKernelVa = MmMapIoSpaceEx(pa, (SIZE_T)m_RegionSize, protect);
+    return m_pKernelVa != NULL ? STATUS_SUCCESS : STATUS_INSUFFICIENT_RESOURCES;
+}
+
+NTSTATUS VioGpu3dAllocation::RegionMdlLocked()
+{
+    PAGED_CODE();
+
+    if (m_pRegionMdl != NULL)
+    {
+        return STATUS_SUCCESS;
+    }
+    // IoAllocateMdl takes less than 4 GiB.
+    if (m_RegionSize > MAXULONG - PAGE_SIZE)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+    NTSTATUS status = SystemViewLocked();
+    if (!NT_SUCCESS(status))
+    {
+        return status;
+    }
+    PMDL pMdl = IoAllocateMdl(m_pKernelVa, (ULONG)m_RegionSize, FALSE, FALSE, NULL);
+    if (pMdl == NULL)
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    MmBuildMdlForNonPagedPool(pMdl);
+    m_pRegionMdl = pMdl;
+    return STATUS_SUCCESS;
+}
+
+// A WOW64 process reads only the low half of the pointer the escape returns.
+NTSTATUS VioGpu3dAllocation::MapBelow4GLocked(_Out_ PVOID *pAddress)
+{
+    PAGED_CODE();
+
+    *pAddress = NULL;
+    NTSTATUS status = RegionMdlLocked();
+    if (!NT_SUCCESS(status))
+    {
+        return status;
+    }
+    PVOID address = NULL;
+    // Documented to land in a 32-bit process's 32-bit range; DxgkCbMapMemory promises nothing of the kind.
+    __try
+    {
+        address = MmMapLockedPagesSpecifyCache(m_pRegionMdl, UserMode, m_CacheType, NULL, FALSE, NormalPagePriority);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        address = NULL;
+    }
+    if (address == NULL)
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    if ((ULONGLONG)(ULONG_PTR)address + m_RegionSize > 0x100000000ull)
+    {
+        DbgPrint(TRACE_LEVEL_ERROR,
+                 ("%s blob %u mapped at %p, past a 32-bit process's 4 GiB\n", __FUNCTION__, m_ResId, address));
+        MmUnmapLockedPages(address, m_pRegionMdl);
+        return STATUS_CONFLICTING_ADDRESSES;
+    }
+    *pAddress = address;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS VioGpu3dAllocation::UnmapViewLocked(_In_ const VIOGPU3D_USER_MAPPING *pMapping)
+{
+    PAGED_CODE();
+
+    if (pMapping->Below4G)
+    {
+        MmUnmapLockedPages(pMapping->Address, m_pRegionMdl);
+        return STATUS_SUCCESS;
+    }
+    return m_pAdapter->GetDxgkInterface()->DxgkCbUnmapMemory(m_pAdapter->GetDxgkInterface()->DeviceHandle,
+                                                             pMapping->Address);
+}
+
 NTSTATUS VioGpu3dAllocation::MapToProcess(_Out_ PVOID *pAddress)
 {
     PAGED_CODE();
@@ -467,46 +665,9 @@ NTSTATUS VioGpu3dAllocation::MapToProcess(_Out_ PVOID *pAddress)
     {
         return STATUS_INVALID_PARAMETER;
     }
-    VioGpu3dHostVisible *pRegion = m_pAdapter->GetHostVisible();
-    NTSTATUS status = STATUS_SUCCESS;
 
     LockMap(&m_MapLock);
-    if (!m_HostMapped)
-    {
-        ULONGLONG size = m_Info.Base.Blob.Size;
-        ULONGLONG offset = 0;
-        status = pRegion->Allocate(size, &offset);
-        if (NT_SUCCESS(status))
-        {
-            UINT mapInfo = m_pAdapter->ctrlQueue.MapBlob(m_CreatorCtxId, m_ResId, offset);
-            switch (mapInfo)
-            {
-                case VIRTIO_GPU_MAP_CACHE_CACHED:
-                    m_CacheType = MmCached;
-                    break;
-                case VIRTIO_GPU_MAP_CACHE_WC:
-                    m_CacheType = MmWriteCombined;
-                    break;
-                case VIRTIO_GPU_MAP_CACHE_UNCACHED:
-                    m_CacheType = MmNonCached;
-                    break;
-                default:
-                    status = STATUS_UNSUCCESSFUL;
-                    break;
-            }
-            if (NT_SUCCESS(status))
-            {
-                m_HostMapped = TRUE;
-                m_RegionOffset = offset;
-                m_RegionSize = size;
-            }
-            else
-            {
-                pRegion->Free(offset, size);
-            }
-        }
-    }
-
+    NTSTATUS status = HostMapLocked();
     VIOGPU3D_USER_MAPPING *pMapping = NULL;
     if (NT_SUCCESS(status))
     {
@@ -515,21 +676,30 @@ NTSTATUS VioGpu3dAllocation::MapToProcess(_Out_ PVOID *pAddress)
     }
     if (NT_SUCCESS(status))
     {
-        PHYSICAL_ADDRESS pa = pRegion->GetBase();
-        pa.QuadPart += m_RegionOffset;
         PVOID address = NULL;
-        // The documented way for a display miniport to map device memory into the calling process.
-        status = m_pAdapter->GetDxgkInterface()->DxgkCbMapMemory(m_pAdapter->GetDxgkInterface()->DeviceHandle,
-                                                                 pa,
-                                                                 (ULONG)m_RegionSize,
-                                                                 FALSE,
-                                                                 TRUE,
-                                                                 m_CacheType,
-                                                                 &address);
+        BOOLEAN below4G = IoIs32bitProcess(NULL);
+        if (below4G)
+        {
+            status = MapBelow4GLocked(&address);
+        }
+        else
+        {
+            PHYSICAL_ADDRESS pa = m_pAdapter->GetHostVisible()->GetBase();
+            pa.QuadPart += m_RegionOffset;
+            // The documented way for a display miniport to map device memory into the calling process.
+            status = m_pAdapter->GetDxgkInterface()->DxgkCbMapMemory(m_pAdapter->GetDxgkInterface()->DeviceHandle,
+                                                                     pa,
+                                                                     (ULONG)m_RegionSize,
+                                                                     FALSE,
+                                                                     TRUE,
+                                                                     m_CacheType,
+                                                                     &address);
+        }
         if (NT_SUCCESS(status))
         {
             pMapping->Process = PsGetCurrentProcess();
             pMapping->Address = address;
+            pMapping->Below4G = below4G;
             InsertTailList(&m_UserMappings, &pMapping->Link);
             *pAddress = address;
             pMapping = NULL;
@@ -551,8 +721,7 @@ NTSTATUS VioGpu3dAllocation::UnmapFromProcess(PVOID address)
         VIOGPU3D_USER_MAPPING *pMapping = CONTAINING_RECORD(p, VIOGPU3D_USER_MAPPING, Link);
         if (pMapping->Address == address && pMapping->Process == PsGetCurrentProcess())
         {
-            status = m_pAdapter->GetDxgkInterface()->DxgkCbUnmapMemory(m_pAdapter->GetDxgkInterface()->DeviceHandle,
-                                                                       address);
+            status = UnmapViewLocked(pMapping);
             RemoveEntryList(&pMapping->Link);
             delete pMapping;
             break;
@@ -575,8 +744,7 @@ void VioGpu3dAllocation::ReleaseHostMapping()
                                                             Link);
         if (pMapping->Process == PsGetCurrentProcess())
         {
-            m_pAdapter->GetDxgkInterface()->DxgkCbUnmapMemory(m_pAdapter->GetDxgkInterface()->DeviceHandle,
-                                                              pMapping->Address);
+            UnmapViewLocked(pMapping);
         }
         else
         {
@@ -594,10 +762,20 @@ void VioGpu3dAllocation::ReleaseHostMapping()
         }
         else
         {
+            if (m_pRegionMdl != NULL)
+            {
+                IoFreeMdl(m_pRegionMdl);
+            }
+            if (m_pKernelVa != NULL)
+            {
+                MmUnmapIoSpace(m_pKernelVa, (SIZE_T)m_RegionSize);
+            }
             m_pAdapter->ctrlQueue.UnmapBlob(m_CreatorCtxId, m_ResId);
             m_pAdapter->GetHostVisible()->Free(m_RegionOffset, m_RegionSize);
         }
         m_HostMapped = FALSE;
+        m_pRegionMdl = NULL;
+        m_pKernelVa = NULL;
     }
     UnlockMap(&m_MapLock);
 }
@@ -606,7 +784,21 @@ NTSTATUS VioGpu3dAllocation::AttachBacking(_In_ PMDL pMdl, SIZE_T offset, SIZE_T
 {
     PAGED_CODE();
 
-    if (m_Kind != VIOGPU3D_ALLOCATION_3D || pMdl == NULL || pages == 0)
+    if (pMdl == NULL || pages == 0)
+    {
+        return STATUS_SUCCESS;
+    }
+    if (m_Kind == VIOGPU3D_ALLOCATION_CPU)
+    {
+        // The present reaches the pages through VidMm's MDL while a DMA buffer names the allocation.
+        if (pages * PAGE_SIZE >= (ULONGLONG)m_Pitch * m_Height && offset <= MAXULONG)
+        {
+            m_pApertureMdl = pMdl;
+            m_ApertureMdlOffset = (ULONG)offset;
+        }
+        return STATUS_SUCCESS;
+    }
+    if (m_Kind != VIOGPU3D_ALLOCATION_3D)
     {
         return STATUS_SUCCESS;
     }
@@ -654,11 +846,86 @@ void VioGpu3dAllocation::DetachBacking()
 {
     PAGED_CODE();
 
+    m_pApertureMdl = NULL;
+    m_ApertureMdlOffset = 0;
     if (m_Backed)
     {
         m_pAdapter->ctrlQueue.DetachBacking(m_ResId);
         m_Backed = FALSE;
     }
+}
+
+BOOLEAN VioGpu3dAllocation::IsPresentable() const
+{
+    PAGED_CODE();
+
+    if (m_Width == 0 || m_Height == 0 || m_Pitch < m_Width * 4)
+    {
+        return FALSE;
+    }
+    if (m_Kind == VIOGPU3D_ALLOCATION_CPU)
+    {
+        return TRUE;
+    }
+    if (m_Kind != VIOGPU3D_ALLOCATION_BLOB || !m_Created ||
+        !(m_Info.Base.Blob.Flags & VIRTIO_WDDM_BLOB_FLAG_MAPPABLE) ||
+        (ULONGLONG)m_Pitch * m_Height > m_Info.Base.Blob.Size)
+    {
+        return FALSE;
+    }
+    if (m_KernelSurface)
+    {
+        return TRUE;
+    }
+    // Venus described its rows, in the byte order of the kernel driver's surfaces.
+    return m_Info.NumPlanes == 1 && (m_Info.Base.Blob.Info.Format == VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM ||
+                                     m_Info.Base.Blob.Info.Format == VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM);
+}
+
+BOOLEAN VioGpu3dAllocation::GetCpuView(_Out_ VIOGPU3D_CPU_VIEW *pView)
+{
+    PAGED_CODE();
+
+    RtlZeroMemory(pView, sizeof(*pView));
+    if (!IsPresentable())
+    {
+        return FALSE;
+    }
+    pView->Width = m_Width;
+    pView->Height = m_Height;
+    pView->Pitch = m_Pitch;
+    if (m_Kind == VIOGPU3D_ALLOCATION_CPU)
+    {
+        PMDL pMdl = m_pApertureMdl;
+        if (pMdl == NULL)
+        {
+            return FALSE;
+        }
+        PUCHAR base = (PUCHAR)MmGetSystemAddressForMdlSafe(pMdl, NormalPagePriority | MdlMappingNoExecute);
+        if (base == NULL)
+        {
+            return FALSE;
+        }
+        pView->Bits = base + (SIZE_T)m_ApertureMdlOffset * PAGE_SIZE;
+        pView->Cached = TRUE;
+        return TRUE;
+    }
+    LockMap(&m_MapLock);
+    NTSTATUS status = HostMapLocked();
+    if (NT_SUCCESS(status))
+    {
+        status = SystemViewLocked();
+    }
+    PVOID va = m_pKernelVa;
+    MEMORY_CACHING_TYPE cacheType = m_CacheType;
+    UnlockMap(&m_MapLock);
+    if (!NT_SUCCESS(status) || va == NULL)
+    {
+        return FALSE;
+    }
+    pView->Bits = (PUCHAR)va;
+    pView->Cached = cacheType == MmCached;
+    return TRUE;
 }
 
 void VioGpu3dAllocation::DescribeAllocation(_Inout_ DXGKARG_DESCRIBEALLOCATION *pDescribe) const
@@ -734,13 +1001,15 @@ NTSTATUS VioGpu3dAdapter::DestroyAllocation(_In_ CONST DXGKARG_DESTROYALLOCATION
     return STATUS_SUCCESS;
 }
 
+// A shared texture's record on every surface, so that a process that opens one knows what it is.
 NTSTATUS VioGpu3dAdapter::GetStandardAllocationDriverData(_Inout_ DXGKARG_GETSTANDARDALLOCATIONDRIVERDATA *pStandard)
 {
     PAGED_CODE();
 
-    UINT width = 0, height = 0;
+    UINT width = 0, height = 0, kind = VIOGPU3D_SURFACE_KERNEL_CPU;
     D3DDDIFORMAT format = D3DDDIFMT_X8R8G8B8;
-    D3DDDI_VIDEO_PRESENT_SOURCE_ID sourceId = 0;
+    D3DDDI_VIDEO_PRESENT_SOURCE_ID sourceId = D3DDDI_ID_UNINITIALIZED;
+    UINT *pPitch = NULL;
     switch (pStandard->StandardAllocationType)
     {
         case D3DKMDT_STANDARDALLOCATION_SHAREDPRIMARYSURFACE:
@@ -748,23 +1017,38 @@ NTSTATUS VioGpu3dAdapter::GetStandardAllocationDriverData(_Inout_ DXGKARG_GETSTA
             height = pStandard->pCreateSharedPrimarySurfaceData->Height;
             format = pStandard->pCreateSharedPrimarySurfaceData->Format;
             sourceId = pStandard->pCreateSharedPrimarySurfaceData->VidPnSourceId;
+            kind = VIOGPU3D_SURFACE_KERNEL_BLOB;
             break;
         case D3DKMDT_STANDARDALLOCATION_SHADOWSURFACE:
             width = pStandard->pCreateShadowSurfaceData->Width;
             height = pStandard->pCreateShadowSurfaceData->Height;
             format = pStandard->pCreateShadowSurfaceData->Format;
-            pStandard->pCreateShadowSurfaceData->Pitch = width * 4;
+            pPitch = &pStandard->pCreateShadowSurfaceData->Pitch;
             break;
         case D3DKMDT_STANDARDALLOCATION_STAGINGSURFACE:
             width = pStandard->pCreateStagingSurfaceData->Width;
             height = pStandard->pCreateStagingSurfaceData->Height;
-            pStandard->pCreateStagingSurfaceData->Pitch = width * 4;
+            pPitch = &pStandard->pCreateStagingSurfaceData->Pitch;
             break;
         case D3DKMDT_STANDARDALLOCATION_GDISURFACE:
             width = pStandard->pCreateGdiSurfaceData->Width;
             height = pStandard->pCreateGdiSurfaceData->Height;
             format = pStandard->pCreateGdiSurfaceData->Format;
-            pStandard->pCreateGdiSurfaceData->Pitch = width * 4;
+            pPitch = &pStandard->pCreateGdiSurfaceData->Pitch;
+            switch (pStandard->pCreateGdiSurfaceData->Type)
+            {
+                case D3DKMDT_GDISURFACE_TEXTURE:
+                    kind = VIOGPU3D_SURFACE_KERNEL_BLOB;
+                    break;
+                case D3DKMDT_GDISURFACE_STAGING_CPUVISIBLE:
+                    break;
+                default:
+                    DbgPrint(TRACE_LEVEL_WARNING,
+                             ("%s GDI surface of type %d refused\n",
+                              __FUNCTION__,
+                              pStandard->pCreateGdiSurfaceData->Type));
+                    return STATUS_NOT_SUPPORTED;
+            }
             break;
         default:
             return STATUS_NOT_SUPPORTED;
@@ -777,9 +1061,17 @@ NTSTATUS VioGpu3dAdapter::GetStandardAllocationDriverData(_Inout_ DXGKARG_GETSTA
     {
         return STATUS_INVALID_PARAMETER;
     }
+    if (kind == VIOGPU3D_SURFACE_KERNEL_BLOB && m_OwnCtxId == 0)
+    {
+        return STATUS_NOT_SUPPORTED;
+    }
+    UINT pitch = (UINT)AlignUp((ULONGLONG)width * 4, VIOGPU3D_SURFACE_PITCH_ALIGNMENT);
+    if (pPitch != NULL)
+    {
+        *pPitch = pitch;
+    }
 
-    pStandard->AllocationPrivateDriverDataSize = sizeof(VIRTIO_WDDM_CREATE_ALLOCATION) +
-                                                 sizeof(VIOGPU3D_STANDARD_ALLOCATION);
+    pStandard->AllocationPrivateDriverDataSize = sizeof(VIRTIO_WDDM_CREATE_ALLOCATION) + sizeof(VIOGPU3D_SURFACE);
     pStandard->ResourcePrivateDriverDataSize = 0;
     if (pStandard->pAllocationPrivateDriverData == NULL)
     {
@@ -788,25 +1080,46 @@ NTSTATUS VioGpu3dAdapter::GetStandardAllocationDriverData(_Inout_ DXGKARG_GETSTA
 
     VIRTIO_WDDM_CREATE_ALLOCATION *pCreate = (VIRTIO_WDDM_CREATE_ALLOCATION *)pStandard->pAllocationPrivateDriverData;
     RtlZeroMemory(pCreate, pStandard->AllocationPrivateDriverDataSize);
-    VIRTIO_WDDM_ALLOCATE_3D *p3d = &pCreate->Base.Resource3d;
-    p3d->Tag = VIRTIO_WDDM_ALLOCATE_3D_TAG;
-    p3d->Target = VIRGL_TARGET_TEXTURE_2D;
-    p3d->Format = ColorFormat(format);
-    p3d->Bind = VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW | VIRGL_BIND_DISPLAY_TARGET | VIRGL_BIND_SCANOUT;
-    p3d->Width = width;
-    p3d->Height = height;
-    p3d->Depth = 1;
-    p3d->ArraySize = 1;
-    p3d->Size = (UINT64)width * 4 * height;
+    pCreate->Modifier = VIRTIO_WDDM_MODIFIER_INVALID;
+    if (kind == VIOGPU3D_SURFACE_KERNEL_BLOB)
+    {
+        VIRTIO_WDDM_ALLOCATE_BLOB *pBlob = &pCreate->Base.Blob;
+        pBlob->Tag = VIRTIO_WDDM_ALLOCATE_BLOB_TAG;
+        pBlob->Mem = VIRTIO_WDDM_BLOB_MEM_HOST3D;
+        pBlob->Flags = VIRTIO_WDDM_BLOB_FLAG_MAPPABLE | VIRTIO_WDDM_BLOB_FLAG_SHAREABLE;
+        pBlob->Size = AlignUp((ULONGLONG)pitch * height, m_BlobAlignment);
+        pBlob->Info.Width = width;
+        pBlob->Info.Height = height;
+        pBlob->Info.Format = ColorFormat(format);
+        pBlob->Info.Bind = VIRGL_BIND_RENDER_TARGET | VIRGL_BIND_SAMPLER_VIEW | VIRGL_BIND_DISPLAY_TARGET |
+                           VIRGL_BIND_SCANOUT;
+        pCreate->NumPlanes = 1;
+        pCreate->Planes[0].Offset = 0;
+        pCreate->Planes[0].Size = (UINT64)pitch * height;
+        pCreate->Planes[0].Stride = pitch;
+    }
 
-    VIOGPU3D_STANDARD_ALLOCATION *pTrailer = (VIOGPU3D_STANDARD_ALLOCATION *)(pCreate + 1);
-    pTrailer->Magic = VIOGPU3D_STANDARD_MAGIC;
-    pTrailer->Type = pStandard->StandardAllocationType;
-    pTrailer->Width = width;
-    pTrailer->Height = height;
-    pTrailer->Pitch = width * 4;
-    pTrailer->Format = format;
-    pTrailer->VidPnSourceId = sourceId;
+    VIOGPU3D_SURFACE *pSurface = (VIOGPU3D_SURFACE *)(pCreate + 1);
+    pSurface->Magic = VIOGPU3D_SURFACE_MAGIC;
+    pSurface->Size = sizeof(VIOGPU3D_SURFACE);
+    pSurface->Kind = kind;
+    pSurface->Flags = VIOGPU3D_SURFACE_FLAG_LINEAR;
+    pSurface->Width = width;
+    pSurface->Height = height;
+    pSurface->MipLevels = 1;
+    pSurface->ArraySize = 1;
+    pSurface->Format = format == D3DDDIFMT_A8R8G8B8 ? VIOGPU3D_DXGI_FORMAT_B8G8R8A8_UNORM
+                                                    : VIOGPU3D_DXGI_FORMAT_B8G8R8X8_UNORM;
+    pSurface->SampleCount = 1;
+    pSurface->Usage = VIOGPU3D_D3D11_USAGE_DEFAULT;
+    pSurface->BindFlags = VIOGPU3D_D3D11_BIND_RENDER_TARGET | VIOGPU3D_D3D11_BIND_SHADER_RESOURCE;
+    pSurface->CpuAccessFlags = 0;
+    pSurface->MiscFlags = VIOGPU3D_D3D11_RESOURCE_MISC_SHARED;
+    pSurface->Pitch = pitch;
+    pSurface->StandardType = pStandard->StandardAllocationType;
+    pSurface->VidPnSourceId = sourceId;
+    pSurface->D3dFormat = format;
+    pSurface->Cookie = m_SurfaceCookie;
     return STATUS_SUCCESS;
 }
 

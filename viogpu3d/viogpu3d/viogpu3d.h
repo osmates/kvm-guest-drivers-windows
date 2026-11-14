@@ -117,12 +117,56 @@ struct VIOGPU3D_USER_MAPPING
     LIST_ENTRY Link;
     PEPROCESS Process;
     PVOID Address;
+    // MmMapLockedPagesSpecifyCache's view for a 32-bit process, else DxgkCbMapMemory's.
+    BOOLEAN Below4G;
 };
 
 enum VIOGPU3D_ALLOCATION_KIND
 {
     VIOGPU3D_ALLOCATION_BLOB,
     VIOGPU3D_ALLOCATION_3D,
+    // Shadow and staging surfaces: only the present reads them, so no host resource.
+    VIOGPU3D_ALLOCATION_CPU,
+};
+
+struct VIOGPU3D_CPU_VIEW
+{
+    PUCHAR Bits;
+    UINT Width;
+    UINT Height;
+    UINT Pitch;
+    // Device memory mapped uncached or write-combined takes aligned 4-byte accesses only.
+    BOOLEAN Cached;
+};
+
+#define VIOGPU3D_PRESENT_MAGIC 0x50334756u
+#define VIOGPU3D_PRESENT_BLT   1u
+#define VIOGPU3D_PRESENT_FILL  2u
+#define VIOGPU3D_PRESENT_RECTS 16u
+
+// Only Present writes a non-virtual context's private data (no Render), so these pointers are the driver's own.
+struct VIOGPU3D_PRESENT_OP
+{
+    UINT Magic;
+    UINT Kind;
+    VioGpu3dAllocation *Source;
+    VioGpu3dAllocation *Destination;
+    // A destination rectangle's place in the source.
+    LONG SourceDx;
+    LONG SourceDy;
+    UINT Color;
+    UINT RectCount;
+    RECT Rects[VIOGPU3D_PRESENT_RECTS];
+};
+
+#define VIOGPU3D_PRESENT_PRIVATE_SIZE (8 * sizeof(VIOGPU3D_PRESENT_OP))
+
+struct VIOGPU3D_PRESENT_WORK
+{
+    LIST_ENTRY Link;
+    VIOGPU3D_DMA *Dma;
+    UINT Count;
+    VIOGPU3D_PRESENT_OP Ops[1];
 };
 
 // One WDDM allocation and the virtio resource behind it.
@@ -148,6 +192,10 @@ class VioGpu3dAllocation
 
     void DescribeAllocation(_Inout_ DXGKARG_DESCRIBEALLOCATION *pDescribe) const;
 
+    // At PASSIVE_LEVEL, while a DMA buffer that names the allocation runs.
+    BOOLEAN GetCpuView(_Out_ VIOGPU3D_CPU_VIEW *pView);
+    BOOLEAN IsPresentable() const;
+
     UINT GetResId() const
     {
         return m_ResId;
@@ -155,6 +203,10 @@ class VioGpu3dAllocation
     BOOLEAN IsBlob() const
     {
         return m_Kind == VIOGPU3D_ALLOCATION_BLOB;
+    }
+    BOOLEAN IsKernelSurface() const
+    {
+        return m_KernelSurface;
     }
     const VIRTIO_WDDM_CREATE_ALLOCATION &GetInfo() const
     {
@@ -183,7 +235,15 @@ class VioGpu3dAllocation
     }
 
   private:
+    NTSTATUS InitKernelSurface(_Inout_ DXGK_ALLOCATIONINFO *pInfo,
+                               _Inout_ VIRTIO_WDDM_CREATE_ALLOCATION *pCreate,
+                               _In_ const VIOGPU3D_SURFACE *pSurface);
     NTSTATUS SendPrelude(_In_ VioGpu3dDevice *pDevice);
+    NTSTATUS HostMapLocked();
+    NTSTATUS SystemViewLocked();
+    NTSTATUS RegionMdlLocked();
+    NTSTATUS MapBelow4GLocked(_Out_ PVOID *pAddress);
+    NTSTATUS UnmapViewLocked(_In_ const VIOGPU3D_USER_MAPPING *pMapping);
     void ReleaseHostMapping();
 
     VioGpu3dAdapter *m_pAdapter;
@@ -195,6 +255,8 @@ class VioGpu3dAllocation
     PUCHAR m_pPrelude;
     UINT m_PreludeSize;
 
+    BOOLEAN m_KernelSurface;
+    UINT m_StandardType;
     BOOLEAN m_Primary;
     UINT m_Width;
     UINT m_Height;
@@ -202,13 +264,18 @@ class VioGpu3dAllocation
     D3DDDIFORMAT m_Format;
 
     BOOLEAN m_Backed;
+    // A CPU surface's pages while VidMm keeps them in the aperture.
+    PMDL m_pApertureMdl;
+    ULONG m_ApertureMdlOffset;
 
-    // The blob's place in the host-visible region while the host maps it there, and the processes it is mapped in.
+    // The region's range while the host maps the blob there; the system view and its MDL once something needs them.
     KEVENT m_MapLock;
     BOOLEAN m_HostMapped;
     ULONGLONG m_RegionOffset;
     ULONGLONG m_RegionSize;
     MEMORY_CACHING_TYPE m_CacheType;
+    PVOID m_pKernelVa;
+    PMDL m_pRegionMdl;
     LIST_ENTRY m_UserMappings;
 };
 
@@ -398,6 +465,7 @@ class VioGpu3dAdapter final : IVioGpuPCI
     NTSTATUS DestroyAllocation(_In_ CONST DXGKARG_DESTROYALLOCATION *pDestroyAllocation);
     NTSTATUS GetStandardAllocationDriverData(_Inout_ DXGKARG_GETSTANDARDALLOCATIONDRIVERDATA *pStandard);
     NTSTATUS BuildPagingBuffer(_Inout_ DXGKARG_BUILDPAGINGBUFFER *pBuildPagingBuffer);
+    NTSTATUS Present(_In_ VioGpu3dContext *pContext, _Inout_ DXGKARG_PRESENT *pPresent);
 
     NTSTATUS SubmitCommand(_In_ CONST DXGKARG_SUBMITCOMMAND *pSubmitCommand);
     NTSTATUS PreemptCommand(_In_ CONST DXGKARG_PREEMPTCOMMAND *pPreemptCommand);
@@ -437,6 +505,14 @@ class VioGpu3dAdapter final : IVioGpuPCI
     {
         return m_BlobAlignment;
     }
+    UINT GetOwnCtxId() const
+    {
+        return m_OwnCtxId;
+    }
+    ULONGLONG GetSurfaceCookie() const
+    {
+        return m_SurfaceCookie;
+    }
     const VIOGPU3D_CAPSET *FindCapset(UINT id) const;
     VioGpu3dAllocation *AllocationFromHandle(D3DKMT_HANDLE handle);
 
@@ -448,6 +524,8 @@ class VioGpu3dAdapter final : IVioGpuPCI
     {
         return (ULONGLONG)InterlockedIncrement64((volatile LONG64 *)&m_NextFence);
     }
+    // The work thread ends pDma once it ran the ops.
+    BOOLEAN QueuePresentOps(_In_reads_bytes_(size) const VOID *pPrivateData, UINT size, _In_ VIOGPU3D_DMA *pDma);
     VIOGPU3D_ESCAPE_FENCE *TrackEscapeFence(VioGpu3dDevice *pDevice, ULONGLONG fenceId);
     static void EscapeFenceSignaled(void *ctx);
     void WaitForEscapeFence(VioGpu3dDevice *pDevice, ULONGLONG fenceId, VIOGPU3D_DMA *pDma);
@@ -475,6 +553,12 @@ class VioGpu3dAdapter final : IVioGpuPCI
     void ReportCompletion(UINT node, UINT fenceId);
     void ReportPreemption(UINT node, UINT preemptionFenceId, UINT lastCompleted);
 
+    NTSTATUS CreateOwnContext(void);
+    void DestroyOwnContext(void);
+    VIOGPU3D_PRESENT_WORK *TakePresentWork(BOOLEAN run);
+    void RunPresents(BOOLEAN execute);
+    void RunPresentOp(_In_ const VIOGPU3D_PRESENT_OP *pOp);
+
     NTSTATUS EscapeCapset(_Inout_ VIRTIO_WDDM_CAPSET *pCapset, UINT size);
     NTSTATUS EscapeResourceInfo(_Inout_ VIRTIO_WDDM_RESOURCE_INFO *pInfo);
     NTSTATUS EscapeBlobMap(_Inout_ VIRTIO_WDDM_BLOB_MAP *pMap);
@@ -501,6 +585,15 @@ class VioGpu3dAdapter final : IVioGpuPCI
     BOOLEAN m_HasVenus;
     ULONG m_BlobAlignment;
     VioGpu3dHostVisible m_HostVisible;
+    UINT m_OwnCtxId;
+    // Marks the records GetStandardAllocationDriverData writes, so that no process can claim a kernel surface.
+    ULONGLONG m_SurfaceCookie;
+
+    KSPIN_LOCK m_PresentLock;
+    LIST_ENTRY m_PresentWork;
+    KEVENT m_PresentEvent;
+    // Signaled while the work thread runs no op.
+    KEVENT m_PresentIdle;
     VIOGPU3D_CAPSET m_Capsets[VIRTIO_GPU_MAX_CAPSET_ID + 1];
     UINT64 m_CapsetMask;
 

@@ -390,6 +390,8 @@ NTSTATUS APIENTRY VioGpu3dCreateContext(_In_ CONST HANDLE hDevice, _Inout_ DXGKA
     else
     {
         pInfo->DmaBufferSize = VIOGPU3D_DMA_BUFFER_SIZE;
+        // The blts and fills of Present.
+        pInfo->DmaBufferPrivateDataSize = VIOGPU3D_PRESENT_PRIVATE_SIZE;
         pInfo->DmaBufferSegmentSet = 0;
         pInfo->AllocationListSize = pCreateContext->Flags.GdiContext ? DXGK_ALLOCATION_LIST_SIZE_GDICONTEXT : 64;
         pInfo->PatchLocationListSize = 64;
@@ -443,13 +445,15 @@ NTSTATUS APIENTRY VioGpu3dRenderGdi(_In_ CONST HANDLE hContext, _Inout_ DXGKARG_
     return STATUS_NOT_SUPPORTED;
 }
 
-// A flip needs nothing in the DMA buffer: the scheduler sets the source address once the buffers before it are done.
-// A blt would need the host to copy between resources, which a Venus scanout on macOS cannot.
 NTSTATUS APIENTRY VioGpu3dPresent(_In_ CONST HANDLE hContext, _Inout_ DXGKARG_PRESENT *pPresent)
 {
     PAGED_CODE();
-    UNREFERENCED_PARAMETER(hContext);
-    return pPresent->Flags.Flip ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+    VioGpu3dContext *pContext = reinterpret_cast<VioGpu3dContext *>(hContext);
+    if (pContext == NULL)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+    return pContext->GetDevice()->GetAdapter()->Present(pContext, pPresent);
 }
 
 NTSTATUS APIENTRY VioGpu3dBuildPagingBuffer(_In_ CONST HANDLE hAdapter,

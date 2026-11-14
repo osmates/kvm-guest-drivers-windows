@@ -33,6 +33,7 @@
 #include "vidpn.h"
 #include "baseobj.h"
 #include "bitops.h"
+#include <bcrypt.h>
 #if !DBG
 #include "adapter.tmh"
 #endif
@@ -107,6 +108,12 @@ VioGpu3dAdapter::VioGpu3dAdapter(_In_ DEVICE_OBJECT *pPhysicalDeviceObject)
     m_u32NumScanouts = 0;
     m_HasVenus = FALSE;
     m_BlobAlignment = PAGE_SIZE;
+    m_OwnCtxId = 0;
+    m_SurfaceCookie = 0;
+    KeInitializeSpinLock(&m_PresentLock);
+    InitializeListHead(&m_PresentWork);
+    KeInitializeEvent(&m_PresentEvent, SynchronizationEvent, FALSE);
+    KeInitializeEvent(&m_PresentIdle, NotificationEvent, TRUE);
     m_pPageTables = NULL;
     m_PageTablesPA.QuadPart = 0;
     m_NextFence = 0;
@@ -239,6 +246,27 @@ NTSTATUS VioGpu3dAdapter::StartDevice(_In_ DXGK_START_INFO *pDxgkStartInfo,
         return STATUS_UNSUCCESSFUL;
     }
 
+    // The primary is a Venus blob, which every process imports.
+    if (!m_HasVenus)
+    {
+        DbgPrint(TRACE_LEVEL_FATAL, ("%s the GPU offers no Venus, which the primary needs\n", __FUNCTION__));
+        return STATUS_UNSUCCESSFUL;
+    }
+    ULONGLONG cookie = 0;
+    Status = BCryptGenRandom(NULL, (PUCHAR)&cookie, sizeof(cookie), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    if (!NT_SUCCESS(Status))
+    {
+        DbgPrint(TRACE_LEVEL_FATAL, ("%s no random surface mark: %x\n", __FUNCTION__, Status));
+        return Status;
+    }
+    // Never zero, the value a record has once Init took it.
+    m_SurfaceCookie = cookie | 1;
+    Status = CreateOwnContext();
+    if (!NT_SUCCESS(Status))
+    {
+        return Status;
+    }
+
     Status = vidpn->Start(pNumberOfViews, pNumberOfChildren);
     if (!NT_SUCCESS(Status))
     {
@@ -274,7 +302,49 @@ NTSTATUS VioGpu3dAdapter::StopDevice(VOID)
 
     m_Flags.DriverStarted = FALSE;
     vidpn->StopFlipThread();
+    DestroyOwnContext();
     return STATUS_SUCCESS;
+}
+
+NTSTATUS VioGpu3dAdapter::CreateOwnContext(void)
+{
+    PAGED_CODE();
+
+    static const CHAR name[] = "viogpu3d";
+    BOOLEAN fresh = m_OwnCtxId == 0;
+    if (fresh)
+    {
+        m_OwnCtxId = ctxIdr.GetId();
+        if (m_OwnCtxId == 0)
+        {
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+    }
+    // No Venus command ever goes to it: its blobs are plain shared memory.
+    UINT reply = ctrlQueue.CreateContext(m_OwnCtxId, VIRTIO_WDDM_CAPSET_ID_VENUS, name, sizeof(name) - 1);
+    if (reply != VIRTIO_GPU_RESP_OK_NODATA)
+    {
+        DbgPrint(TRACE_LEVEL_FATAL, ("%s the driver's Venus context refused with %x\n", __FUNCTION__, reply));
+        if (fresh)
+        {
+            ctxIdr.PutId(m_OwnCtxId);
+            m_OwnCtxId = 0;
+        }
+        return STATUS_UNSUCCESSFUL;
+    }
+    return STATUS_SUCCESS;
+}
+
+void VioGpu3dAdapter::DestroyOwnContext(void)
+{
+    PAGED_CODE();
+
+    if (m_OwnCtxId != 0)
+    {
+        ctrlQueue.DestroyContext(m_OwnCtxId);
+        ctxIdr.PutId(m_OwnCtxId);
+        m_OwnCtxId = 0;
+    }
 }
 
 NTSTATUS VioGpu3dAdapter::SetPowerState(_In_ ULONG HardwareUid,
@@ -307,8 +377,16 @@ NTSTATUS VioGpu3dAdapter::SetPowerState(_In_ ULONG HardwareUid,
     {
         case PowerDeviceUnspecified:
         case PowerDeviceD0:
-            VioGpuAdapterInit();
-            break;
+            {
+                BOOLEAN wasReset = !IsHardwareInit();
+                VioGpuAdapterInit();
+                // The reset took the host's contexts; the driver's own comes back under its id.
+                if (wasReset && IsHardwareInit() && m_OwnCtxId != 0)
+                {
+                    CreateOwnContext();
+                }
+                break;
+            }
         default:
             vidpn->Powerdown();
             VioGpuAdapterClose();
@@ -468,6 +546,8 @@ NTSTATUS VioGpu3dAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *
                 pCaps->MemoryManagementCaps.VirtualAddressingSupported = 1;
                 pCaps->MemoryManagementCaps.GpuMmuSupported = 1;
                 pCaps->MemoryManagementCaps.SectionBackedPrimary = 1;
+                // The primary is a blob in the host; GDI's drawing reaches it through the present's blts.
+                pCaps->MemoryManagementCaps.NonCpuVisiblePrimary = 1;
                 pCaps->SchedulingCaps.MultiEngineAware = 1;
                 pCaps->SchedulingCaps.PreemptionAware = 1;
                 pCaps->PreemptionCaps.GraphicsPreemptionGranularity = D3DKMDT_GRAPHICS_PREEMPTION_DMA_BUFFER_BOUNDARY;
@@ -478,6 +558,8 @@ NTSTATUS VioGpu3dAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *
                 pCaps->MaxQueuedFlipOnVSync = 1;
                 // The blt surface pitch alignment, 1 << AlignmentShift bytes; the DDI wants at least 2.
                 pCaps->PresentationCaps.AlignmentShift = 2;
+                // The present copies rows top down.
+                pCaps->PresentationCaps.NoOverlapScreenBlt = 1;
                 pCaps->SupportNonVGA = IsVgaDevice();
                 pCaps->SupportSmoothRotation = FALSE;
                 return STATUS_SUCCESS;
@@ -987,15 +1069,223 @@ void VioGpu3dAdapter::ThreadWorkRoutine(void)
     PAGED_CODE();
 
     KeSetPriorityThread(KeGetCurrentThread(), LOW_REALTIME_PRIORITY);
+    PVOID events[] = {&m_ConfigUpdateEvent, &m_PresentEvent};
     for (;;)
     {
-        KeWaitForSingleObject(&m_ConfigUpdateEvent, Executive, KernelMode, FALSE, NULL);
+        NTSTATUS woken = KeWaitForMultipleObjects(ARRAYSIZE(events),
+                                                  events,
+                                                  WaitAny,
+                                                  Executive,
+                                                  KernelMode,
+                                                  FALSE,
+                                                  NULL,
+                                                  NULL);
         if (m_bStopWorkThread)
         {
+            // What is left completes undone: nothing shows it any more.
+            RunPresents(FALSE);
             PsTerminateSystemThread(STATUS_SUCCESS);
             break;
         }
-        ConfigChanged();
+        if (woken == STATUS_WAIT_0)
+        {
+            ConfigChanged();
+        }
+        else
+        {
+            RunPresents(TRUE);
+        }
+    }
+}
+
+// CDD's blts and fills, which the work thread runs on the CPU once the scheduler submits the buffer.
+NTSTATUS VioGpu3dAdapter::Present(_In_ VioGpu3dContext *pContext, _Inout_ DXGKARG_PRESENT *pPresent)
+{
+    PAGED_CODE();
+
+    DXGK_PRESENTFLAGS flags = pPresent->Flags;
+    // The scheduler sets the source address once the buffers before the flip are done.
+    if (flags.Flip)
+    {
+        return STATUS_SUCCESS;
+    }
+    // CreateContext gives a context with virtual addressing no DMA buffer to carry the ops.
+    if (pContext == NULL || pContext->IsVirtual())
+    {
+        DbgPrint(TRACE_LEVEL_WARNING, ("%s blt or fill on a context with virtual addressing refused\n", __FUNCTION__));
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (!(flags.Blt || flags.ColorFill) || flags.SrcColorKey || flags.DstColorKey || flags.LinearToSrgb ||
+        flags.Rotate || flags.BltStereoUseRight)
+    {
+        DbgPrint(TRACE_LEVEL_WARNING, ("%s present with flags %x not supported\n", __FUNCTION__, flags.Value));
+        return STATUS_NOT_SUPPORTED;
+    }
+    VioGpu3dAllocation *pDst = reinterpret_cast<VioGpu3dAllocation *>(pPresent->pAllocationList[DXGK_PRESENT_DESTINATION_INDEX].hDeviceSpecificAllocation);
+    VioGpu3dAllocation *pSrc = flags.Blt ? reinterpret_cast<VioGpu3dAllocation *>(pPresent->pAllocationList[DXGK_PRESENT_SOURCE_INDEX].hDeviceSpecificAllocation)
+                                         : NULL;
+    if (pDst == NULL || !pDst->IsPresentable() || (flags.Blt && (pSrc == NULL || !pSrc->IsPresentable())))
+    {
+        DbgPrint(TRACE_LEVEL_WARNING, ("%s present between surfaces it cannot copy\n", __FUNCTION__));
+        return STATUS_NOT_SUPPORTED;
+    }
+    // No stretch: CDD's blts are one to one.
+    if (flags.Blt &&
+        (pPresent->SrcRect.right - pPresent->SrcRect.left != pPresent->DstRect.right - pPresent->DstRect.left ||
+         pPresent->SrcRect.bottom - pPresent->SrcRect.top != pPresent->DstRect.bottom - pPresent->DstRect.top))
+    {
+        return STATUS_NOT_SUPPORTED;
+    }
+    if (pPresent->pDmaBuffer == NULL || pPresent->DmaSize < sizeof(UINT) || pPresent->pDmaBufferPrivateData == NULL ||
+        pPresent->DmaBufferPrivateDataSize < sizeof(VIOGPU3D_PRESENT_OP))
+    {
+        return STATUS_GRAPHICS_INSUFFICIENT_DMA_BUFFER;
+    }
+
+    VIOGPU3D_PRESENT_OP *pOp = (VIOGPU3D_PRESENT_OP *)pPresent->pDmaBufferPrivateData;
+    RtlZeroMemory(pOp, sizeof(*pOp));
+    pOp->Magic = VIOGPU3D_PRESENT_MAGIC;
+    pOp->Kind = flags.Blt ? VIOGPU3D_PRESENT_BLT : VIOGPU3D_PRESENT_FILL;
+    pOp->Source = pSrc;
+    pOp->Destination = pDst;
+    pOp->SourceDx = pPresent->SrcRect.left - pPresent->DstRect.left;
+    pOp->SourceDy = pPresent->SrcRect.top - pPresent->DstRect.top;
+    pOp->Color = pPresent->Color;
+    UINT total = pPresent->SubRectCnt;
+    UINT first = pPresent->MultipassOffset;
+    if (total == 0)
+    {
+        pOp->RectCount = 1;
+        pOp->Rects[0] = pPresent->DstRect;
+        first = 0;
+    }
+    else
+    {
+        pOp->RectCount = first < total ? min(total - first, VIOGPU3D_PRESENT_RECTS) : 0;
+        for (UINT i = 0; i < pOp->RectCount; i++)
+        {
+            pOp->Rects[i] = pPresent->pDstSubRects[first + i];
+        }
+    }
+    pPresent->pDmaBufferPrivateData = (PUCHAR)pPresent->pDmaBufferPrivateData + sizeof(*pOp);
+    pPresent->DmaBufferPrivateDataSize -= sizeof(*pOp);
+    // The buffer itself only marks that it carries something; the work is in its private data.
+    *(UINT *)pPresent->pDmaBuffer = VIOGPU3D_PRESENT_MAGIC;
+    pPresent->pDmaBuffer = (PUCHAR)pPresent->pDmaBuffer + sizeof(UINT);
+    pPresent->DmaSize -= sizeof(UINT);
+    if (total != 0 && first + pOp->RectCount < total)
+    {
+        pPresent->MultipassOffset = first + pOp->RectCount;
+        return STATUS_GRAPHICS_INSUFFICIENT_DMA_BUFFER;
+    }
+    return STATUS_SUCCESS;
+}
+
+static void CopyRow(_Out_writes_bytes_(pixels * 4) PUCHAR pDst,
+                    _In_reads_bytes_(pixels * 4) const UCHAR *pSrc,
+                    UINT pixels,
+                    BOOLEAN cached)
+{
+    if (cached)
+    {
+        RtlCopyMemory(pDst, pSrc, (SIZE_T)pixels * 4);
+        return;
+    }
+    volatile UINT32 *d = (volatile UINT32 *)pDst;
+    const volatile UINT32 *s = (const volatile UINT32 *)pSrc;
+    for (UINT i = 0; i < pixels; i++)
+    {
+        d[i] = s[i];
+    }
+}
+
+static void FillRow(_Out_writes_bytes_(pixels * 4) PUCHAR pDst, UINT32 color, UINT pixels)
+{
+    volatile UINT32 *d = (volatile UINT32 *)pDst;
+    for (UINT i = 0; i < pixels; i++)
+    {
+        d[i] = color;
+    }
+}
+
+void VioGpu3dAdapter::RunPresentOp(_In_ const VIOGPU3D_PRESENT_OP *pOp)
+{
+    PAGED_CODE();
+
+    VIOGPU3D_CPU_VIEW dst, src;
+    RtlZeroMemory(&src, sizeof(src));
+    if (!pOp->Destination->GetCpuView(&dst) || (pOp->Kind == VIOGPU3D_PRESENT_BLT && !pOp->Source->GetCpuView(&src)))
+    {
+        DbgPrint(TRACE_LEVEL_ERROR, ("%s a surface of the present has no CPU view\n", __FUNCTION__));
+        return;
+    }
+    BOOLEAN cached = dst.Cached && (pOp->Kind != VIOGPU3D_PRESENT_BLT || src.Cached);
+    LONG drawnLeft = MAXLONG, drawnTop = MAXLONG, drawnRight = 0, drawnBottom = 0;
+    for (UINT r = 0; r < pOp->RectCount && r < VIOGPU3D_PRESENT_RECTS; r++)
+    {
+        LONG left = max(pOp->Rects[r].left, 0L);
+        LONG top = max(pOp->Rects[r].top, 0L);
+        LONG right = min(pOp->Rects[r].right, (LONG)dst.Width);
+        LONG bottom = min(pOp->Rects[r].bottom, (LONG)dst.Height);
+        if (pOp->Kind == VIOGPU3D_PRESENT_BLT)
+        {
+            left = max(left, -pOp->SourceDx);
+            top = max(top, -pOp->SourceDy);
+            right = min(right, (LONG)src.Width - pOp->SourceDx);
+            bottom = min(bottom, (LONG)src.Height - pOp->SourceDy);
+        }
+        if (left >= right || top >= bottom)
+        {
+            continue;
+        }
+        UINT pixels = (UINT)(right - left);
+        for (LONG y = top; y < bottom; y++)
+        {
+            PUCHAR pRow = dst.Bits + (SIZE_T)y * dst.Pitch + (SIZE_T)left * 4;
+            if (pOp->Kind == VIOGPU3D_PRESENT_BLT)
+            {
+                const UCHAR *pFrom = src.Bits + (SIZE_T)(y + pOp->SourceDy) * src.Pitch +
+                                     (SIZE_T)(left + pOp->SourceDx) * 4;
+                CopyRow(pRow, pFrom, pixels, cached);
+            }
+            else
+            {
+                FillRow(pRow, pOp->Color, pixels);
+            }
+        }
+        drawnLeft = min(drawnLeft, left);
+        drawnTop = min(drawnTop, top);
+        drawnRight = max(drawnRight, right);
+        drawnBottom = max(drawnBottom, bottom);
+    }
+    // The host copies a shown blob again at a flush of the rectangle.
+    if (drawnLeft < drawnRight && pOp->Destination->IsBlob() && vidpn->IsShowing(pOp->Destination))
+    {
+        ctrlQueue.ResFlush(pOp->Destination->GetResId(),
+                           (UINT)(drawnRight - drawnLeft),
+                           (UINT)(drawnBottom - drawnTop),
+                           (UINT)drawnLeft,
+                           (UINT)drawnTop);
+    }
+}
+
+void VioGpu3dAdapter::RunPresents(BOOLEAN execute)
+{
+    PAGED_CODE();
+
+    VIOGPU3D_PRESENT_WORK *pWork;
+    while ((pWork = TakePresentWork(execute)) != NULL)
+    {
+        for (UINT i = 0; execute && i < pWork->Count; i++)
+        {
+            RunPresentOp(&pWork->Ops[i]);
+        }
+        EndDma(pWork->Dma);
+        delete[] (PUCHAR)pWork;
+        if (execute)
+        {
+            KeSetEvent(&m_PresentIdle, IO_NO_INCREMENT, FALSE);
+        }
     }
 }
 
@@ -1095,6 +1385,9 @@ NTSTATUS VioGpu3dAdapter::ResetFromTimeout(VOID)
         pNode->PreemptRequested = FALSE;
     }
     KeReleaseSpinLock(&m_NodeLock, irql);
+    RunPresents(FALSE);
+    // dxgkrnl may free the allocations once this returns, so no copy may still run.
+    KeWaitForSingleObject(&m_PresentIdle, Executive, KernelMode, FALSE, NULL);
     return STATUS_SUCCESS;
 }
 
@@ -1333,8 +1626,78 @@ NTSTATUS VioGpu3dAdapter::SubmitCommand(_In_ CONST DXGKARG_SUBMITCOMMAND *pSubmi
     {
         return STATUS_NO_MEMORY;
     }
+    // The work thread ends a buffer that carries blts or fills, once it ran them.
+    UINT start = pSubmitCommand->DmaBufferPrivateDataSubmissionStartOffset;
+    UINT end = pSubmitCommand->DmaBufferPrivateDataSubmissionEndOffset;
+    if (pContext != NULL && !pContext->IsVirtual() && pSubmitCommand->Flags.Present && !pSubmitCommand->Flags.Paging &&
+        !pSubmitCommand->Flags.Flip && pSubmitCommand->pDmaBufferPrivateData != NULL && start < end &&
+        end <= pSubmitCommand->DmaBufferPrivateDataSize &&
+        QueuePresentOps((const UCHAR *)pSubmitCommand->pDmaBufferPrivateData + start, end - start, pDma))
+    {
+        return STATUS_SUCCESS;
+    }
     EndDma(pDma);
     return STATUS_SUCCESS;
+}
+
+BOOLEAN VioGpu3dAdapter::QueuePresentOps(_In_reads_bytes_(size) const VOID *pPrivateData,
+                                         UINT size,
+                                         _In_ VIOGPU3D_DMA *pDma)
+{
+    if (pPrivateData == NULL)
+    {
+        return FALSE;
+    }
+    const VIOGPU3D_PRESENT_OP *pOps = (const VIOGPU3D_PRESENT_OP *)pPrivateData;
+    UINT count = size / sizeof(VIOGPU3D_PRESENT_OP);
+    for (UINT i = 0; i < count; i++)
+    {
+        if (pOps[i].Magic != VIOGPU3D_PRESENT_MAGIC || pOps[i].Destination == NULL ||
+            (pOps[i].Kind == VIOGPU3D_PRESENT_BLT && pOps[i].Source == NULL) ||
+            (pOps[i].Kind != VIOGPU3D_PRESENT_BLT && pOps[i].Kind != VIOGPU3D_PRESENT_FILL) ||
+            pOps[i].RectCount > VIOGPU3D_PRESENT_RECTS)
+        {
+            count = i;
+            break;
+        }
+    }
+    if (count == 0)
+    {
+        return FALSE;
+    }
+    SIZE_T bytes = FIELD_OFFSET(VIOGPU3D_PRESENT_WORK, Ops) + (SIZE_T)count * sizeof(VIOGPU3D_PRESENT_OP);
+    VIOGPU3D_PRESENT_WORK *pWork = reinterpret_cast<VIOGPU3D_PRESENT_WORK *>(new (NonPagedPoolNx) UCHAR[bytes]);
+    if (pWork == NULL)
+    {
+        return FALSE;
+    }
+    pWork->Dma = pDma;
+    pWork->Count = count;
+    RtlCopyMemory(pWork->Ops, pOps, (SIZE_T)count * sizeof(VIOGPU3D_PRESENT_OP));
+    KIRQL irql;
+    KeAcquireSpinLock(&m_PresentLock, &irql);
+    InsertTailList(&m_PresentWork, &pWork->Link);
+    KeReleaseSpinLock(&m_PresentLock, irql);
+    KeSetEvent(&m_PresentEvent, IO_NO_INCREMENT, FALSE);
+    return TRUE;
+}
+
+VIOGPU3D_PRESENT_WORK *VioGpu3dAdapter::TakePresentWork(BOOLEAN run)
+{
+    VIOGPU3D_PRESENT_WORK *pWork = NULL;
+    KIRQL irql;
+    KeAcquireSpinLock(&m_PresentLock, &irql);
+    if (!IsListEmpty(&m_PresentWork))
+    {
+        pWork = CONTAINING_RECORD(RemoveHeadList(&m_PresentWork), VIOGPU3D_PRESENT_WORK, Link);
+        // Under the lock, so that a reset that finds the list empty also finds this op running.
+        if (run)
+        {
+            KeClearEvent(&m_PresentIdle);
+        }
+    }
+    KeReleaseSpinLock(&m_PresentLock, irql);
+    return pWork;
 }
 
 // Only between DMA buffers: what the host was given runs to its end, and the preemption is reported once the node

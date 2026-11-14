@@ -139,6 +139,10 @@ class VioGpuVidPN
     }
 
     NTSTATUS SetVidPnSourceAddress(const DXGKARG_SETVIDPNSOURCEADDRESS *pSetVidPnSourceAddress);
+    BOOLEAN IsShowing(const VioGpu3dAllocation *pAllocation) const
+    {
+        return pAllocation != NULL && m_sourceRes == pAllocation;
+    }
 
   private:
     NTSTATUS SetSourceModeAndPath(CONST D3DKMDT_VIDPN_SOURCE_MODE *pSourceMode,
