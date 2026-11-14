@@ -32,9 +32,11 @@ viogpu3d.sys = 1,,
 [Manufacturer]
 %VENDOR%=VioGpu3d,NT$ARCH$
 
-; QEMU's virtio-gpu-gl-pci and OSMates' accelerated GPU (subsystem 1101).
+; QEMU's virtio-gpu-gl-pci, whose IDs are those of QEMU's 2D GPU too, and OSMates' accelerated GPU, subsystem
+; 1af4:1101 at revision 2. OSMates' 2D GPU is revision 1, which viogpudo keeps.
 [VioGpu3d.NT$ARCH$]
-%VioGpu3d.DeviceDesc% = VioGpu3d_Inst, PCI\VEN_1AF4&DEV_1050&SUBSYS_1100_INX_SUBSYS_VENDOR_ID&REV_01, PCI\VEN_1AF4&DEV_1050&SUBSYS_1101_INX_SUBSYS_VENDOR_ID&REV_01
+%VioGpu3d.DeviceDesc% = VioGpu3d_Inst, PCI\VEN_1AF4&DEV_1050&SUBSYS_1100_INX_SUBSYS_VENDOR_ID&REV_01
+%VioGpu3d.DeviceDesc% = VioGpu3d_Inst, PCI\VEN_1AF4&DEV_1050&SUBSYS_11011AF4&REV_02
 
 [VioGpu3d_Files_Driver]
 viogpu3d.sys,,,2

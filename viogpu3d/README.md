@@ -17,7 +17,9 @@ display-only driver in `viogpu` stays as it is.
 - Takes `EDID`, `RESOURCE_BLOB`, `CONTEXT_INIT` and `BLOB_ALIGNMENT` when offered.
 - Venus needs blobs, context init, the `VENUS` capability set and the host-visible region: shared memory region 1
   of a `VIRTIO_PCI_CAP_SHARED_MEMORY_CFG` capability, which may sit behind a 64-bit BAR of 4 GiB.
-- The INF matches QEMU's subsystem `1100` and OSMates' `1101`, revision 1.
+- The INF matches QEMU's virtio-gpu-gl-pci (subsystem `1100`, revision 1, the IDs of QEMU's 2D GPU too) and
+  OSMates' accelerated GPU (subsystem `1af4:1101`, revision 2). OSMates' 2D GPU is revision 1, so viogpudo keeps it
+  with both drivers installed.
 
 ## Model
 
