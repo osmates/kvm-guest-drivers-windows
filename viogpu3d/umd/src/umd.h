@@ -30,7 +30,7 @@ struct umd_adapter
     const D3DDDI_ADAPTERCALLBACKS *pAdapterCallbacks;
     VIRTIO_WDDM_ADAPTER_INFO info;
     LUID luid;
-    // The instance that answered GetCaps; it lives until CloseAdapter.
+    // This process's GetCaps instance, held from this adapter's first GetCaps until CloseAdapter.
     struct umd_vk *caps;
 };
 

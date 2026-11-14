@@ -17,11 +17,14 @@ CC=${CC:-cc}
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 
-"$CC" -std=c11 -g -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all \
-    -I"$UMD/src" -I"$VULKAN_INC" \
-    "$HERE/umd_host_tests.c" \
-    "$UMD/src/umd_adapter_info.c" "$UMD/src/umd_blob_map.c" "$UMD/src/umd_format.c" "$UMD/src/umd_path.c" \
-    "$UMD/src/umd_pipeline.c" \
-    "$UMD/src/umd_resource_record.c" "$UMD/src/umd_vk_chain.c" \
-    -o "$OUT/umd_host_tests"
-"$OUT/umd_host_tests"
+# Once with ASan and UBSan, once with TSan for the shared GetCaps instance's threads.
+for sanitizers in address,undefined thread; do
+    "$CC" -std=c11 -g -O1 -Wall -Wextra -Werror -pthread -fsanitize=$sanitizers -fno-sanitize-recover=all \
+        -I"$UMD/src" -I"$VULKAN_INC" \
+        "$HERE/umd_host_tests.c" \
+        "$UMD/src/umd_adapter_info.c" "$UMD/src/umd_blob_map.c" "$UMD/src/umd_format.c" "$UMD/src/umd_path.c" \
+        "$UMD/src/umd_pipeline.c" \
+        "$UMD/src/umd_resource_record.c" "$UMD/src/umd_shared.c" "$UMD/src/umd_vk_chain.c" \
+        -o "$OUT/umd_host_tests"
+    "$OUT/umd_host_tests"
+done

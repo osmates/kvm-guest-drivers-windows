@@ -9,9 +9,14 @@
 #include "umd_path.h"
 #include "umd_pipeline.h"
 #include "umd_resource_record.h"
+#include "umd_shared.h"
 #include "umd_vk_chain.h"
 
+#include <pthread.h>
+#include <sched.h>
+#include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
 
@@ -573,6 +578,207 @@ static void eachDriverLoadsItsOwnIcd(void)
     CHECK(wcscmp(out, want) == 0);
 }
 
+// The shared object stands in for the GetCaps Venus instance: made, used and freed as an adapter would.
+struct shared_probe
+{
+    atomic_int alive;
+};
+
+static atomic_int sharedMade;
+static atomic_int sharedFreed;
+static atomic_int sharedLive;
+static atomic_int sharedMostLive;
+static HRESULT sharedMakeResult;
+
+static HRESULT probeMake(void **object)
+{
+    struct shared_probe *probe;
+    int live, most;
+
+    if (FAILED(sharedMakeResult))
+    {
+        return sharedMakeResult;
+    }
+    probe = (struct shared_probe *)malloc(sizeof(*probe));
+    if (probe == NULL)
+    {
+        return (HRESULT)0x8007000E;
+    }
+    atomic_init(&probe->alive, 1);
+    atomic_fetch_add(&sharedMade, 1);
+    live = atomic_fetch_add(&sharedLive, 1) + 1;
+    most = atomic_load(&sharedMostLive);
+    while (live > most && !atomic_compare_exchange_weak(&sharedMostLive, &most, live))
+    {
+    }
+    *object = probe;
+    return S_OK;
+}
+
+static void probeFree(void *object)
+{
+    struct shared_probe *probe = (struct shared_probe *)object;
+
+    atomic_store(&probe->alive, 0);
+    atomic_fetch_add(&sharedFreed, 1);
+    atomic_fetch_sub(&sharedLive, 1);
+    free(probe);
+}
+
+static void sharedProbeReset(void)
+{
+    atomic_store(&sharedMade, 0);
+    atomic_store(&sharedFreed, 0);
+    atomic_store(&sharedLive, 0);
+    atomic_store(&sharedMostLive, 0);
+    sharedMakeResult = S_OK;
+}
+
+static void sharedObjectIsMadeOnceAndFreedByTheLastHolder(void)
+{
+    struct umd_shared shared = {UMD_LOCK_INIT, NULL, 0};
+    void *first = NULL, *second = NULL;
+
+    sharedProbeReset();
+    CHECK(umd_shared_acquire(&shared, probeMake, &first) == S_OK);
+    CHECK(umd_shared_acquire(&shared, probeMake, &second) == S_OK);
+    CHECK(first != NULL && first == second);
+    CHECK(atomic_load(&sharedMade) == 1 && shared.holders == 2);
+
+    umd_shared_release(&shared, probeFree);
+    CHECK(atomic_load(&sharedFreed) == 0 && shared.object == first);
+    umd_shared_release(&shared, probeFree);
+    CHECK(atomic_load(&sharedFreed) == 1 && shared.holders == 0 && shared.object == NULL);
+
+    // A release without a hold frees nothing twice.
+    umd_shared_release(&shared, probeFree);
+    CHECK(atomic_load(&sharedFreed) == 1 && shared.holders == 0);
+}
+
+static void aFailedMakeLeavesNoHolder(void)
+{
+    struct umd_shared shared = {UMD_LOCK_INIT, NULL, 0};
+    void *object = &shared;
+
+    sharedProbeReset();
+    sharedMakeResult = (HRESULT)0x887A0004;
+    CHECK(umd_shared_acquire(&shared, probeMake, &object) == sharedMakeResult);
+    CHECK(object == NULL && shared.holders == 0 && shared.object == NULL);
+
+    sharedMakeResult = S_OK;
+    CHECK(umd_shared_acquire(&shared, probeMake, &object) == S_OK);
+    CHECK(object != NULL && shared.holders == 1 && atomic_load(&sharedMade) == 1);
+    umd_shared_release(&shared, probeFree);
+    CHECK(atomic_load(&sharedFreed) == 1);
+}
+
+static void reopenAfterTheLastCloseMakesANewOne(void)
+{
+    struct umd_shared shared = {UMD_LOCK_INIT, NULL, 0};
+    void *object;
+
+    sharedProbeReset();
+    for (int round = 0; round < 3; round++)
+    {
+        CHECK(umd_shared_acquire(&shared, probeMake, &object) == S_OK);
+        CHECK(object != NULL && atomic_load(&sharedLive) == 1);
+        umd_shared_release(&shared, probeFree);
+        CHECK(atomic_load(&sharedLive) == 0 && shared.object == NULL);
+    }
+    CHECK(atomic_load(&sharedMade) == 3 && atomic_load(&sharedFreed) == 3);
+}
+
+struct shared_churn
+{
+    struct umd_shared *shared;
+    int rounds;
+    atomic_int *errors;
+};
+
+// An adapter's life on one thread: open, GetCaps, use the instance, close.
+static void *sharedChurn(void *arg)
+{
+    struct shared_churn *churn = (struct shared_churn *)arg;
+
+    for (int round = 0; round < churn->rounds; round++)
+    {
+        struct shared_probe *probe = NULL;
+
+        if (umd_shared_acquire(churn->shared, probeMake, (void **)&probe) != S_OK || probe == NULL)
+        {
+            atomic_fetch_add(churn->errors, 1);
+            continue;
+        }
+        if ((round & 3) == 0)
+        {
+            sched_yield();
+        }
+        if (atomic_load(&probe->alive) != 1)
+        {
+            atomic_fetch_add(churn->errors, 1);
+        }
+        umd_shared_release(churn->shared, probeFree);
+    }
+    return NULL;
+}
+
+static void runChurn(struct umd_shared *shared, atomic_int *errors)
+{
+    enum
+    {
+        THREADS = 8,
+        ROUNDS = 4000,
+    };
+    pthread_t threads[THREADS];
+    struct shared_churn churn = {shared, ROUNDS, errors};
+    int started = 0;
+
+    for (int i = 0; i < THREADS; i++)
+    {
+        if (pthread_create(&threads[i], NULL, sharedChurn, &churn) == 0)
+        {
+            started++;
+        }
+    }
+    CHECK(started == THREADS);
+    for (int i = 0; i < started; i++)
+    {
+        pthread_join(threads[i], NULL);
+    }
+}
+
+static void adaptersOpenAndCloseOnManyThreads(void)
+{
+    struct umd_shared shared = {UMD_LOCK_INIT, NULL, 0};
+    atomic_int errors;
+
+    sharedProbeReset();
+    atomic_init(&errors, 0);
+    runChurn(&shared, &errors);
+    CHECK(atomic_load(&errors) == 0);
+    CHECK(atomic_load(&sharedMostLive) == 1);
+    CHECK(atomic_load(&sharedMade) >= 1);
+    CHECK(atomic_load(&sharedMade) == atomic_load(&sharedFreed));
+    CHECK(atomic_load(&sharedLive) == 0 && shared.holders == 0 && shared.object == NULL);
+}
+
+static void anOpenAdapterKeepsTheOneInstanceThroughOthersChurn(void)
+{
+    struct umd_shared shared = {UMD_LOCK_INIT, NULL, 0};
+    atomic_int errors;
+    void *held;
+
+    sharedProbeReset();
+    atomic_init(&errors, 0);
+    CHECK(umd_shared_acquire(&shared, probeMake, &held) == S_OK);
+    runChurn(&shared, &errors);
+    CHECK(atomic_load(&errors) == 0);
+    CHECK(atomic_load(&sharedMade) == 1 && atomic_load(&sharedFreed) == 0);
+    CHECK(shared.holders == 1 && shared.object == held);
+    umd_shared_release(&shared, probeFree);
+    CHECK(atomic_load(&sharedFreed) == 1 && atomic_load(&sharedLive) == 0);
+}
+
 int main(void)
 {
     adapterWithVenusIsTaken();
@@ -596,6 +802,11 @@ int main(void)
     prependLeavesTheCallersChain();
     icdPathIsBesideTheDriver();
     eachDriverLoadsItsOwnIcd();
+    sharedObjectIsMadeOnceAndFreedByTheLastHolder();
+    aFailedMakeLeavesNoHolder();
+    reopenAfterTheLastCloseMakesANewOne();
+    adaptersOpenAndCloseOnManyThreads();
+    anOpenAdapterKeepsTheOneInstanceThroughOthersChurn();
 
     printf("umd host tests: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

@@ -10,6 +10,7 @@
 #include "umd_format.h"
 #include "umd_pipeline.h"
 #include "umd_resource_record.h"
+#include "umd_shared.h"
 
 #include <d3d11_umd.h>
 
@@ -102,6 +103,37 @@ void triton_backend_adapter_probe(PTRITON_ADAPTER pAdapter, struct triton_adapte
     out->wddm2_0_only = TRUE;
 }
 
+// One per process: each Venus instance has its own contexts on the host.
+static struct umd_shared umd_caps_vk = {UMD_LOCK_INIT, NULL, 0};
+
+static HRESULT umd_caps_vk_make(void **object)
+{
+    struct umd_vk *vk = (struct umd_vk *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*vk));
+    HRESULT hr;
+
+    if (vk == NULL)
+    {
+        return E_OUTOFMEMORY;
+    }
+    // GetCaps comes before any runtime device, so Venus reaches the kernel driver through D3DKMT itself.
+    hr = umd_vk_create(NULL, vk);
+    if (FAILED(hr))
+    {
+        HeapFree(GetProcessHeap(), 0, vk);
+        return hr;
+    }
+    umd_log("caps: made this process's Venus instance");
+    *object = vk;
+    return S_OK;
+}
+
+static void umd_caps_vk_free(void *object)
+{
+    umd_vk_destroy((struct umd_vk *)object);
+    HeapFree(GetProcessHeap(), 0, object);
+    umd_log("caps: released this process's Venus instance with its last adapter");
+}
+
 void triton_backend_close_adapter(PTRITON_ADAPTER pAdapter)
 {
     struct umd_adapter *adapter = (struct umd_adapter *)pAdapter->pBackend;
@@ -112,8 +144,8 @@ void triton_backend_close_adapter(PTRITON_ADAPTER pAdapter)
     }
     if (adapter->caps != NULL)
     {
-        umd_vk_destroy(adapter->caps);
-        HeapFree(GetProcessHeap(), 0, adapter->caps);
+        umd_shared_release(&umd_caps_vk, umd_caps_vk_free);
+        adapter->caps = NULL;
     }
     HeapFree(GetProcessHeap(), 0, adapter);
     pAdapter->pBackend = NULL;
@@ -157,8 +189,7 @@ static HRESULT umd_dxvk_device(struct umd_vk *vk,
     return hr;
 }
 
-// GetCaps comes before any runtime device, so this instance is Venus's own, through D3DKMT; the runtime never sees its
-// device, which therefore cannot become an app's.
+// The runtime never sees this device, which therefore cannot become an app's.
 HRESULT triton_backend_create_caps_device(PTRITON_ADAPTER pAdapter,
                                           D3D_FEATURE_LEVEL maxLevel,
                                           ID3D11Device **ppDevice,
@@ -186,18 +217,14 @@ HRESULT triton_backend_create_caps_device(PTRITON_ADAPTER pAdapter,
     }
     if (adapter->caps == NULL)
     {
-        struct umd_vk *caps = (struct umd_vk *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*caps));
-        if (caps == NULL)
-        {
-            return E_OUTOFMEMORY;
-        }
-        hr = umd_vk_create(NULL, caps);
+        void *caps;
+
+        hr = umd_shared_acquire(&umd_caps_vk, umd_caps_vk_make, &caps);
         if (FAILED(hr))
         {
-            HeapFree(GetProcessHeap(), 0, caps);
             return hr;
         }
-        adapter->caps = caps;
+        adapter->caps = (struct umd_vk *)caps;
     }
     hr = umd_dxvk_device(adapter->caps, adapter->luid, levels, count, ppDevice, pLevel, ppContext);
     if (SUCCEEDED(hr))

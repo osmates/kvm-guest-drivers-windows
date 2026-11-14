@@ -29,8 +29,12 @@ typedef struct _LUID
     LONG HighPart;
 } LUID;
 
+typedef LONG HRESULT;
+
 #define TRUE                      1
 #define FALSE                     0
+#define S_OK                      ((HRESULT)0)
+#define FAILED(hr)                (((HRESULT)(hr)) < 0)
 
 #define C_ASSERT(e)               _Static_assert(e, #e)
 #define FIELD_OFFSET(type, field) ((LONG)offsetof(type, field))
