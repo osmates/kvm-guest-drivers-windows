@@ -66,7 +66,8 @@ struct umd_device
     struct umd_device *next;
     HANDLE hRTDevice;
     PFND3DDDI_ALLOCATECB runtimeAllocateCb;
-    // The runtime's callbacks with pfnAllocateCb wrapped; Venus keeps a pointer to callbacks for the instance's life.
+    PFND3DDDI_ESCAPECB runtimeEscapeCb;
+    // The runtime's callbacks, two of them wrapped; Venus keeps a pointer to callbacks for the instance's life.
     D3DDDI_DEVICECALLBACKS ktCallbacks;
     VkD3DDDICallbacksMESA callbacks;
     struct umd_vk vk;

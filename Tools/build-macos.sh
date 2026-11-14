@@ -595,7 +595,7 @@ pack_venus_icd() {
 
 UMD_TRITON_SOURCES=(tritonDDI.c tritonDxbc.c tritonDxgi.c tritonHostCaps.c tritonPresent.c tritonQuery.c
     tritonResource.c tritonShader.c tritonState.c tritonView.c)
-UMD_SOURCES=(umd_adapter_info.c umd_backend.c umd_format.c umd_main.c umd_path.c umd_pipeline.c
+UMD_SOURCES=(umd_adapter_info.c umd_backend.c umd_blob_map.c umd_format.c umd_main.c umd_path.c umd_pipeline.c
     umd_resource_record.c umd_vk.c umd_vk_chain.c)
 # What DXVK's meson makes with -Dumd=true, all linked into the driver.
 UMD_DXVK_LIBS=(src/d3d11/libd3d11_umd.a src/dxgi/libdxgi_umd.a src/dxvk/libdxvk.a src/spirv/libspirv.a

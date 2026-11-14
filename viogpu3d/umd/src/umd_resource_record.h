@@ -7,31 +7,6 @@
 
 #include "umd_types.h"
 
-// A shared texture's D3D11 description. It follows VIRTIO_WDDM_CREATE_ALLOCATION in the allocation's private data
-// (Venus appends it as the extra data of VkD3DDDICreateResourceMESA) and reaches the process that opens the texture.
-// Its magic differs from the kernel driver's own record at that offset, which the kernel driver then ignores.
-#define UMD_RESOURCE_RECORD_MAGIC 0x55443356u
-
-#pragma pack(push, 1)
-typedef struct _UMD_RESOURCE_RECORD
-{
-    UINT32 Magic;
-    UINT32 Size;
-    UINT32 Width;
-    UINT32 Height;
-    UINT32 MipLevels;
-    UINT32 ArraySize;
-    UINT32 Format;
-    UINT32 SampleCount;
-    UINT32 Usage;
-    UINT32 BindFlags;
-    UINT32 CpuAccessFlags;
-    UINT32 MiscFlags;
-} UMD_RESOURCE_RECORD;
-#pragma pack(pop)
-
-C_ASSERT(sizeof(UMD_RESOURCE_RECORD) == 48);
-
 struct umd_texture_desc
 {
     UINT width;
@@ -44,14 +19,23 @@ struct umd_texture_desc
     UINT bind_flags;
     UINT cpu_access_flags;
     UINT misc_flags;
+    // VIOGPU3D_SURFACE_*.
+    UINT kind;
+    UINT flags;
+    // Known for the kernel driver's surfaces only.
+    UINT pitch;
+    UINT standard_type;
 };
 
-void umd_resource_record_fill(UMD_RESOURCE_RECORD *record, const struct umd_texture_desc *desc);
+void umd_resource_record_fill(VIOGPU3D_SURFACE *record, const struct umd_texture_desc *desc);
+
+BOOL umd_texture_can_be_linear(const struct umd_texture_desc *desc);
 
 enum umd_open_check
 {
     UMD_OPEN_OK,
     UMD_OPEN_SHORT,
+    UMD_OPEN_KERNEL_CPU_SURFACE,
     UMD_OPEN_NOT_BLOB,
     UMD_OPEN_NOT_HOST3D,
     UMD_OPEN_NOT_SHAREABLE,

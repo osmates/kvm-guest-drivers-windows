@@ -4,6 +4,7 @@
  */
 
 #include "umd.h"
+#include "umd_blob_map.h"
 #include "umd_path.h"
 
 #include <d3d11_umd.h>
@@ -255,6 +256,60 @@ static PFND3DDDI_ALLOCATECB umd_runtime_allocate(HANDLE hRTDevice)
     return allocate;
 }
 
+static PFND3DDDI_ESCAPECB umd_runtime_escape(HANDLE hRTDevice)
+{
+    PFND3DDDI_ESCAPECB escape = NULL;
+
+    AcquireSRWLockShared(&umd_devices_lock);
+    for (struct umd_device *dev = umd_devices; dev != NULL; dev = dev->next)
+    {
+        if (dev->hRTDevice == hRTDevice)
+        {
+            escape = dev->runtimeEscapeCb;
+            break;
+        }
+    }
+    ReleaseSRWLockShared(&umd_devices_lock);
+    return escape;
+}
+
+// A blob map this process cannot hold is undone and fails, so that Venus never uses half a pointer.
+static HRESULT APIENTRY umd_escape_cb(HANDLE hAdapter, const D3DDDICB_ESCAPE *pData)
+{
+    PFND3DDDI_ESCAPECB escape = pData != NULL ? umd_runtime_escape(pData->hDevice) : NULL;
+    VIRTIO_WDDM_BLOB_MAP map;
+    HRESULT hr;
+
+    if (escape == NULL)
+    {
+        return E_INVALIDARG;
+    }
+    hr = escape(hAdapter, pData);
+    if (SUCCEEDED(hr) && umd_blob_map_check(pData->pPrivateDriverData,
+                                            pData->PrivateDriverDataSize,
+                                            sizeof(void *),
+                                            &map) == UMD_BLOB_MAP_TOO_HIGH)
+    {
+        D3DDDICB_ESCAPE undo = *pData;
+        VIRTIO_WDDM_BLOB_MAP unmap = map;
+
+        unmap.Flags = VIRTIO_WDDM_BLOB_MAP_FLAGS_UNMAP;
+        undo.pPrivateDriverData = &unmap;
+        undo.PrivateDriverDataSize = sizeof(unmap);
+        if (FAILED(escape(hAdapter, &undo)))
+        {
+            umd_log("blob map: the unmap of 0x%llx failed", (unsigned long long)map.Ptr);
+        }
+        map.Ptr = 0;
+        memcpy(pData->pPrivateDriverData, &map, sizeof(map));
+        umd_log("blob map: the kernel driver mapped allocation 0x%x at 0x%llx, past this 32-bit process's 4 GiB",
+                (unsigned)map.Handle,
+                (unsigned long long)unmap.Ptr);
+        return E_FAIL;
+    }
+    return hr;
+}
+
 // Venus allocates through this: it gives the kernel allocation of a resource being created back to that resource.
 static HRESULT APIENTRY umd_allocate_cb(HANDLE hRTDevice, D3DDDICB_ALLOCATE *pData)
 {
@@ -283,6 +338,11 @@ void umd_device_callbacks_init(struct umd_device *dev, HANDLE hRTDevice, const D
     dev->ktCallbacks = *runtime;
     dev->runtimeAllocateCb = runtime->pfnAllocateCb;
     dev->ktCallbacks.pfnAllocateCb = umd_allocate_cb;
+    dev->runtimeEscapeCb = runtime->pfnEscapeCb;
+    if (runtime->pfnEscapeCb != NULL)
+    {
+        dev->ktCallbacks.pfnEscapeCb = umd_escape_cb;
+    }
 
     AcquireSRWLockExclusive(&umd_devices_lock);
     dev->next = umd_devices;

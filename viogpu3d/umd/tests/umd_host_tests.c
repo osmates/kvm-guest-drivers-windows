@@ -4,6 +4,7 @@
  */
 
 #include "umd_adapter_info.h"
+#include "umd_blob_map.h"
 #include "umd_format.h"
 #include "umd_path.h"
 #include "umd_pipeline.h"
@@ -27,9 +28,6 @@ static int checks;
             fprintf(stderr, "%s:%d: %s: failed: %s\n", __FILE__, __LINE__, __func__, #cond);                           \
         }                                                                                                              \
     } while (0)
-
-// The kernel driver's own record after VIRTIO_WDDM_CREATE_ALLOCATION (viogpu3d/viogpu3d/allocation.cpp).
-#define KMD_STANDARD_MAGIC 0x56334453u
 
 static VIRTIO_WDDM_ADAPTER_INFO venus_adapter(void)
 {
@@ -155,7 +153,7 @@ static void scanoutFormatsAreTheOnesVenusDescribes(void)
 struct shared_allocation
 {
     VIRTIO_WDDM_CREATE_ALLOCATION create;
-    UMD_RESOURCE_RECORD record;
+    VIOGPU3D_SURFACE record;
 };
 
 static struct umd_texture_desc back_buffer_desc(void)
@@ -171,6 +169,8 @@ static struct umd_texture_desc back_buffer_desc(void)
     desc.sample_count = 1;
     desc.bind_flags = 0x28;
     desc.misc_flags = 0x2;
+    desc.kind = VIOGPU3D_SURFACE_SHARED_TEXTURE;
+    desc.flags = VIOGPU3D_SURFACE_FLAG_LINEAR;
     return desc;
 }
 
@@ -200,10 +200,11 @@ static void recordLayoutFollowsTheInterface(void)
     CHECK(offsetof(struct shared_allocation, record) == 168);
     CHECK(sizeof(VIRTIO_WDDM_RESOURCE_INFO) == 184);
     CHECK(offsetof(VIRTIO_WDDM_RESOURCE_INFO, Info) == 16);
-    CHECK(offsetof(UMD_RESOURCE_RECORD, Magic) == 0);
-    CHECK(UMD_RESOURCE_RECORD_MAGIC != KMD_STANDARD_MAGIC);
+    CHECK(offsetof(VIOGPU3D_SURFACE, Magic) == 0);
+    CHECK(sizeof(VIOGPU3D_SURFACE) == 80);
+    CHECK(offsetof(VIOGPU3D_SURFACE, Cookie) == 72);
     // Below the kernel driver's limit for a resource's extra data.
-    CHECK(sizeof(UMD_RESOURCE_RECORD) <= VIRTIO_WDDM_MAX_SUBMIT_COMMAND_VIRTUAL_SIZE);
+    CHECK(sizeof(VIOGPU3D_SURFACE) <= VIRTIO_WDDM_MAX_SUBMIT_COMMAND_VIRTUAL_SIZE);
 }
 
 static void openReadsWhatTheCreatorWrote(void)
@@ -236,10 +237,16 @@ static void openRefusesWhatVenusCannotImport(void)
     CHECK(umd_resource_record_open(NULL, sizeof(a), 1, &info, &got) == UMD_OPEN_SHORT);
     CHECK(umd_resource_record_open(&a, sizeof(a.create) - 1, 1, &info, &got) == UMD_OPEN_SHORT);
 
-    // A kernel driver surface (GDI, staging) is a virgl 3D resource.
+    // A virgl 3D resource.
     a = shared_allocation();
     a.create.Base.Tag = VIRTIO_WDDM_ALLOCATE_3D_TAG;
     CHECK(umd_resource_record_open(&a, sizeof(a), 1, &info, &got) == UMD_OPEN_NOT_BLOB);
+
+    // The kernel driver's shadow or staging surface: no host resource at all.
+    a = shared_allocation();
+    a.create.Base.Tag = 0;
+    a.record.Kind = VIOGPU3D_SURFACE_KERNEL_CPU;
+    CHECK(umd_resource_record_open(&a, sizeof(a), 1, &info, &got) == UMD_OPEN_KERNEL_CPU_SURFACE);
 
     a = shared_allocation();
     a.create.Base.Blob.Mem = VIRTIO_WDDM_BLOB_MEM_GUEST;
@@ -262,7 +269,7 @@ static void openRefusesWhatVenusCannotImport(void)
     CHECK(umd_resource_record_open(&a, sizeof(a) - 1, 1, &info, &got) == UMD_OPEN_NO_RECORD);
 
     a = shared_allocation();
-    a.record.Magic = KMD_STANDARD_MAGIC;
+    a.record.Magic = 0x56334453u;
     CHECK(umd_resource_record_open(&a, sizeof(a), 1, &info, &got) == UMD_OPEN_NO_RECORD);
 }
 
@@ -280,7 +287,13 @@ static void openRefusesRecordsOutOfRange(void)
         CHECK(umd_resource_record_open(&a, sizeof(a), 1, &info, &got) == UMD_OPEN_BAD_RECORD);                         \
     } while (0)
 
-    BAD_RECORD(Size, 47);
+    BAD_RECORD(Size, 79);
+    BAD_RECORD(Kind, 0);
+    BAD_RECORD(Kind, 4);
+    BAD_RECORD(Flags, 2);
+    BAD_RECORD(MipLevels, 2);
+    BAD_RECORD(ArraySize, 2);
+    BAD_RECORD(SampleCount, 4);
     BAD_RECORD(Width, 0);
     BAD_RECORD(Width, 16385);
     BAD_RECORD(Height, 0);
@@ -296,12 +309,168 @@ static void openRefusesRecordsOutOfRange(void)
 #undef BAD_RECORD
 
     a = shared_allocation();
+    a.record.Flags = 0;
     a.record.Width = 16384;
     a.record.Height = 16384;
     a.record.MipLevels = 15;
     a.record.ArraySize = 2048;
     a.record.SampleCount = 32;
     CHECK(umd_resource_record_open(&a, sizeof(a), 1, &info, &got) == UMD_OPEN_OK);
+}
+
+// GetStandardAllocationDriverData's shared primary as an opening process gets it: mark zeroed, resource id given.
+static struct shared_allocation kernel_primary(UINT32 width, UINT32 height)
+{
+    struct shared_allocation a;
+    UINT32 pitch = (width * 4 + VIOGPU3D_SURFACE_PITCH_ALIGNMENT - 1) & ~(VIOGPU3D_SURFACE_PITCH_ALIGNMENT - 1);
+
+    memset(&a, 0, sizeof(a));
+    a.create.Base.Blob.Tag = VIRTIO_WDDM_ALLOCATE_BLOB_TAG;
+    a.create.Base.Blob.Mem = VIRTIO_WDDM_BLOB_MEM_HOST3D;
+    a.create.Base.Blob.Flags = VIRTIO_WDDM_BLOB_FLAG_MAPPABLE | VIRTIO_WDDM_BLOB_FLAG_SHAREABLE;
+    a.create.Base.Blob.Size = ((UINT64)pitch * height + 16383) & ~16383ull;
+    a.create.Base.Blob.Info.Width = width;
+    a.create.Base.Blob.Info.Height = height;
+    a.create.ResId = 3;
+    a.create.NumPlanes = 1;
+    a.create.Modifier = VIRTIO_WDDM_MODIFIER_INVALID;
+    a.create.Planes[0].Size = (UINT64)pitch * height;
+    a.create.Planes[0].Stride = pitch;
+    a.record.Magic = VIOGPU3D_SURFACE_MAGIC;
+    a.record.Size = sizeof(a.record);
+    a.record.Kind = VIOGPU3D_SURFACE_KERNEL_BLOB;
+    a.record.Flags = VIOGPU3D_SURFACE_FLAG_LINEAR;
+    a.record.Width = width;
+    a.record.Height = height;
+    a.record.MipLevels = 1;
+    a.record.ArraySize = 1;
+    a.record.Format = VIOGPU3D_DXGI_FORMAT_B8G8R8X8_UNORM;
+    a.record.SampleCount = 1;
+    a.record.Usage = VIOGPU3D_D3D11_USAGE_DEFAULT;
+    a.record.BindFlags = VIOGPU3D_D3D11_BIND_RENDER_TARGET | VIOGPU3D_D3D11_BIND_SHADER_RESOURCE;
+    a.record.MiscFlags = VIOGPU3D_D3D11_RESOURCE_MISC_SHARED;
+    a.record.Pitch = pitch;
+    a.record.StandardType = 1;
+    return a;
+}
+
+static void kernelSurfacesOpenAsLinearBlobs(void)
+{
+    struct shared_allocation a = kernel_primary(2880, 1800);
+    struct umd_texture_desc got;
+    VIRTIO_WDDM_RESOURCE_INFO info;
+
+    CHECK(umd_resource_record_open(&a, sizeof(a), 0x40000081u, &info, &got) == UMD_OPEN_OK);
+    CHECK(got.kind == VIOGPU3D_SURFACE_KERNEL_BLOB);
+    CHECK(got.flags == VIOGPU3D_SURFACE_FLAG_LINEAR);
+    CHECK(got.width == 2880 && got.height == 1800 && got.mip_levels == 1 && got.array_size == 1);
+    CHECK(got.format == VIOGPU3D_DXGI_FORMAT_B8G8R8X8_UNORM);
+    CHECK(got.misc_flags == VIOGPU3D_D3D11_RESOURCE_MISC_SHARED);
+    CHECK(got.pitch == 11520);
+    CHECK(got.standard_type == 1);
+    CHECK(info.Handle == 0x40000081u);
+    CHECK(info.Info.ResId == 3);
+    CHECK(info.Info.Modifier == VIRTIO_WDDM_MODIFIER_INVALID);
+
+    // A width whose rows Metal pads: 1366 pixels are 5464 bytes, in rows of 5472.
+    a = kernel_primary(1366, 768);
+    CHECK(umd_resource_record_open(&a, sizeof(a), 1, &info, &got) == UMD_OPEN_OK);
+    CHECK(got.pitch == 5472);
+    // The 5K screen's.
+    a = kernel_primary(5120, 2880);
+    CHECK(umd_resource_record_open(&a, sizeof(a), 1, &info, &got) == UMD_OPEN_OK);
+    CHECK(got.pitch == 20480);
+    CHECK(info.Info.Base.Blob.Size == 20480ull * 2880ull);
+
+    a = kernel_primary(2880, 1800);
+    a.record.Flags = 0;
+    CHECK(umd_resource_record_open(&a, sizeof(a), 1, &info, &got) == UMD_OPEN_BAD_RECORD);
+    a = kernel_primary(2880, 1800);
+    a.record.Pitch = 2880 * 4 - 4;
+    CHECK(umd_resource_record_open(&a, sizeof(a), 1, &info, &got) == UMD_OPEN_BAD_RECORD);
+    a = kernel_primary(2880, 1800);
+    a.create.Base.Blob.Size = 11520ull * 1799ull;
+    CHECK(umd_resource_record_open(&a, sizeof(a), 1, &info, &got) == UMD_OPEN_BAD_RECORD);
+    // A shared texture names no pitch, whatever its record carries.
+    a = shared_allocation();
+    a.record.Pitch = 64;
+    a.record.StandardType = 1;
+    CHECK(umd_resource_record_open(&a, sizeof(a), 1, &info, &got) == UMD_OPEN_OK);
+    CHECK(got.pitch == 0 && got.standard_type == 0);
+}
+
+static void sharedTexturesAreLinearWhenTheyCanBe(void)
+{
+    struct umd_texture_desc desc = back_buffer_desc();
+    VIOGPU3D_SURFACE record;
+
+    CHECK(umd_texture_can_be_linear(&desc));
+    desc.mip_levels = 2;
+    CHECK(!umd_texture_can_be_linear(&desc));
+    desc = back_buffer_desc();
+    desc.array_size = 6;
+    CHECK(!umd_texture_can_be_linear(&desc));
+    desc = back_buffer_desc();
+    desc.sample_count = 4;
+    CHECK(!umd_texture_can_be_linear(&desc));
+
+    // The record is always a shared texture's, and keeps the linear flag alone.
+    desc = back_buffer_desc();
+    desc.kind = VIOGPU3D_SURFACE_KERNEL_BLOB;
+    desc.flags = 0xffu;
+    desc.pitch = 4;
+    umd_resource_record_fill(&record, &desc);
+    CHECK(record.Magic == VIOGPU3D_SURFACE_MAGIC && record.Size == sizeof(record));
+    CHECK(record.Kind == VIOGPU3D_SURFACE_SHARED_TEXTURE);
+    CHECK(record.Flags == VIOGPU3D_SURFACE_FLAG_LINEAR);
+    CHECK(record.Pitch == 0 && record.Cookie == 0);
+}
+
+static VIRTIO_WDDM_BLOB_MAP blob_map(UINT64 ptr)
+{
+    VIRTIO_WDDM_BLOB_MAP map;
+
+    memset(&map, 0, sizeof(map));
+    map.Tag = VIRTIO_WDDM_ESCAPE_BLOB_MAP_TAG;
+    map.Handle = 0x40000042u;
+    map.Ptr = ptr;
+    return map;
+}
+
+static void blobMapsA32BitProcessCannotHoldAreCaught(void)
+{
+    VIRTIO_WDDM_BLOB_MAP map = blob_map(0x7ffe0000ull), got;
+    unsigned char escape[64];
+
+    CHECK(umd_blob_map_check(&map, sizeof(map), 4, &got) == UMD_BLOB_MAP_FITS);
+    CHECK(got.Handle == 0x40000042u && got.Ptr == 0x7ffe0000ull);
+    map = blob_map(0xffff0000ull);
+    CHECK(umd_blob_map_check(&map, sizeof(map), 4, &got) == UMD_BLOB_MAP_FITS);
+    map = blob_map(0x100000000ull);
+    CHECK(umd_blob_map_check(&map, sizeof(map), 4, &got) == UMD_BLOB_MAP_TOO_HIGH);
+    CHECK(got.Ptr == 0x100000000ull);
+    map = blob_map(0x7ff612340000ull);
+    CHECK(umd_blob_map_check(&map, sizeof(map), 4, &got) == UMD_BLOB_MAP_TOO_HIGH);
+    CHECK(umd_blob_map_check(&map, sizeof(map), 8, &got) == UMD_BLOB_MAP_FITS);
+
+    // Venus sends its escape union, larger than the map.
+    memset(escape, 0, sizeof(escape));
+    map = blob_map(0x200000000ull);
+    memcpy(escape, &map, sizeof(map));
+    CHECK(umd_blob_map_check(escape, sizeof(escape), 4, &got) == UMD_BLOB_MAP_TOO_HIGH);
+
+    // An unmap, a refused map, another escape and a short buffer are left alone.
+    map = blob_map(0x200000000ull);
+    map.Flags = VIRTIO_WDDM_BLOB_MAP_FLAGS_UNMAP;
+    CHECK(umd_blob_map_check(&map, sizeof(map), 4, &got) == UMD_BLOB_MAP_OTHER);
+    map = blob_map(0);
+    CHECK(umd_blob_map_check(&map, sizeof(map), 4, &got) == UMD_BLOB_MAP_OTHER);
+    map = blob_map(0x200000000ull);
+    map.Tag = VIRTIO_WDDM_ESCAPE_RESOURCE_INFO_TAG;
+    CHECK(umd_blob_map_check(&map, sizeof(map), 4, &got) == UMD_BLOB_MAP_OTHER);
+    map = blob_map(0x200000000ull);
+    CHECK(umd_blob_map_check(&map, sizeof(map) - 1, 4, &got) == UMD_BLOB_MAP_OTHER);
+    CHECK(umd_blob_map_check(NULL, sizeof(map), 4, &got) == UMD_BLOB_MAP_OTHER);
 }
 
 static void openTextsNameEveryOutcome(void)
@@ -419,6 +588,9 @@ int main(void)
     openRefusesWhatVenusCannotImport();
     openRefusesRecordsOutOfRange();
     openTextsNameEveryOutcome();
+    kernelSurfacesOpenAsLinearBlobs();
+    sharedTexturesAreLinearWhenTheyCanBe();
+    blobMapsA32BitProcessCannotHoldAreCaught();
     allocationsAreSortedByTheirChain();
     aChainThatLoopsIsNotFollowed();
     prependLeavesTheCallersChain();

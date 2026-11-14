@@ -40,11 +40,16 @@ The Direct3D 10 and 11 driver of viogpu3d, on DXVK and Mesa's Venus Vulkan drive
 - Shared textures and display primaries: while DXVK makes one, its memory allocation carries
   `VkD3DDDICreateResourceMESA`, so Venus makes the blob through `pfnAllocateCb` for the runtime's resource (with
   `Primary` and the source of a primary), and the driver keeps the kernel allocation the runtime returns for the
-  present. Primaries are linear `HOST3D` blobs in a format the kernel driver scans out. The texture's D3D11 description
-  follows the blob request in the allocation's private data, for the process that opens it; its layout is the same
-  in 32-bit and 64-bit processes.
-- `OpenResource` reads that description from the opened allocation and imports the blob with
-  `VkD3DDDIOpenResourceMESA`.
+  present. Primaries are `HOST3D` blobs in a format the kernel driver scans out. Every shared texture with one level,
+  layer and sample is linear: a host that shares Venus memory as host memory, as OSMates' does, binds only linear
+  images to it. The texture's record (`VIOGPU3D_SURFACE`, `shared/viogpu3d_uapi.h`) follows the blob request in the
+  allocation's private data, for the process that opens it; its layout is the same in 32-bit and 64-bit processes.
+- `OpenResource` reads the record from the opened allocation and imports the blob with `VkD3DDDIOpenResourceMESA`,
+  linear when its maker made it so. The kernel driver's shared primary and GDI textures carry the same record, as
+  linear blobs of its own Venus context, and open the same way. Its shadow and staging surfaces are guest memory with
+  no host resource: those are refused, with that reason in the log.
+- Venus escapes through the runtime's `pfnEscapeCb`, which the driver wraps: a blob map whose address does not fit
+  this process's pointers is unmapped and fails, so that a 32-bit process never uses the low half of a 64-bit address.
 - The DXGI DDI (present, blt, residency) is Triton's: it presents with `pfnPresentCb` and the kernel allocation above.
 
 ## DXVK
@@ -93,8 +98,9 @@ Tools/build-macos.sh --d3d-umd --venus-icd <aarch64 Mesa build>/src/virtio/vulka
 ## Tests
 
 - `tests/run-host-tests.sh`: the adapter info check and the LUID, pipeline levels to feature levels, shared and
-  scanout formats, the texture description in an allocation's private data against `viogpu3d_uapi.h`'s layouts, the
-  Vulkan allocation chains the driver adds to, and the name and path of each driver's ICD.
+  scanout formats, the texture record in an allocation's private data against `viogpu3d_uapi.h`'s layouts, the
+  kernel driver's surface records as it writes them, which shared textures are linear, the blob map check for
+  32-bit processes, the Vulkan allocation chains the driver adds to, and the name and path of each driver's ICD.
 - `tests/check-package.sh <Install/Win11/ARM64>`, with `MESA_SRC` the Mesa tree of the Venus builds and `MINGW_DIR`
   the llvm-mingw the DLLs were linked with: the INF and the package list the same files; `UserModeDriverName` and
   `UserModeDriverNameWow` fill their four slots;
@@ -112,12 +118,13 @@ Tools/build-macos.sh --d3d-umd --venus-icd <aarch64 Mesa build>/src/virtio/vulka
 - x64 apps: that the D3D runtime of an emulated x64 process takes the ARM64EC view of `UserModeDriverName`'s DLL
   (Windows' own system DLLs for x64 apps are ARM64X; no display driver page says it for drivers).
 - x86 apps: that the WOW64 runtime and the Vulkan loader read the `Wow` values and find the DLLs beside the 64-bit
-  ones; that the kernel driver maps blobs below 4 GiB for a 32-bit process (the blob map escape returns a 64-bit
-  pointer).
-- Shared textures need Venus to export image memory as `OPAQUE_WIN32_KMT`; primaries need linear render targets on
-  KosmicKrisp, and the kernel driver's flip of a `HOST3D` primary.
-- Opening the kernel driver's own surfaces (GDI and staging allocations, virgl 3D resources) is refused: Venus imports
-  blobs only, and DWM opens such surfaces.
+  ones; that the kernel driver's blob maps land below 4 GiB for a 32-bit process, as Microsoft documents for
+  `MmMapLockedPagesSpecifyCache`.
+- Shared textures need Venus to export image memory as `OPAQUE_WIN32_KMT`; primaries and shared textures need linear
+  render targets on KosmicKrisp, and the kernel driver's flip of a `HOST3D` primary.
+- Opening another process's shared texture or the kernel driver's surfaces: on OSMates' host the render server does
+  not yet import shared memory into another Venus context. Which of the kernel driver's surfaces Windows opens in a
+  Direct3D process at all: Microsoft documents the shared primary for full-screen apps and GDI textures for DWM.
 - DXVK code that calls `D3DKMT*` directly (GDI interop, keyed mutexes, NT handle sharing) is linked in; Triton's calls
   never reach it.
 - No D3D12 or D3D9 DDI.

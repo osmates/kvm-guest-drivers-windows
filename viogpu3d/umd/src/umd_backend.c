@@ -36,6 +36,12 @@ C_ASSERT(UMD_DXGI_FORMAT_B8G8R8A8_UNORM_SRGB == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB)
 C_ASSERT(UMD_DXGI_FORMAT_B8G8R8X8_TYPELESS == DXGI_FORMAT_B8G8R8X8_TYPELESS);
 C_ASSERT(UMD_DXGI_FORMAT_B8G8R8X8_UNORM_SRGB == DXGI_FORMAT_B8G8R8X8_UNORM_SRGB);
 C_ASSERT(sizeof(LUID) == VK_LUID_SIZE);
+C_ASSERT(VIOGPU3D_DXGI_FORMAT_B8G8R8A8_UNORM == DXGI_FORMAT_B8G8R8A8_UNORM);
+C_ASSERT(VIOGPU3D_DXGI_FORMAT_B8G8R8X8_UNORM == DXGI_FORMAT_B8G8R8X8_UNORM);
+C_ASSERT(VIOGPU3D_D3D11_USAGE_DEFAULT == D3D11_USAGE_DEFAULT);
+C_ASSERT(VIOGPU3D_D3D11_BIND_SHADER_RESOURCE == D3D11_BIND_SHADER_RESOURCE);
+C_ASSERT(VIOGPU3D_D3D11_BIND_RENDER_TARGET == D3D11_BIND_RENDER_TARGET);
+C_ASSERT(VIOGPU3D_D3D11_RESOURCE_MISC_SHARED == D3D11_RESOURCE_MISC_SHARED);
 
 void triton_backend_log(const char *line)
 {
@@ -292,8 +298,7 @@ static void umd_texture_desc_from(const D3D11_TEXTURE2D_DESC *d, struct umd_text
     out->misc_flags = d->MiscFlags;
 }
 
-// Venus makes the texture's blob through the runtime's pfnAllocateCb for r->hRTResource, with Primary set for a
-// display primary, and appends the texture's record for the processes that open it.
+// Venus makes the blob through pfnAllocateCb for r->hRTResource and appends the record for the processes that open it.
 HRESULT triton_backend_create_shared_texture(PTRITON_DEVICE pD,
                                              PTRITON_RESOURCE r,
                                              const D3D11DDIARG_CREATERESOURCE *pArgs,
@@ -304,7 +309,8 @@ HRESULT triton_backend_create_shared_texture(PTRITON_DEVICE pD,
 {
     const BOOL primary = (flags & TRITON_SHARED_TEXTURE_PRIMARY) != 0;
     struct umd_texture_desc desc;
-    UMD_RESOURCE_RECORD record;
+    VIOGPU3D_SURFACE record;
+    BOOL linear;
     VkD3DDDICreateResourceMESA create;
     struct umd_vk_pending pending;
     D3D11_TEXTURE2D_DESC1 desc1;
@@ -325,6 +331,27 @@ HRESULT triton_backend_create_shared_texture(PTRITON_DEVICE pD,
     }
 
     umd_texture_desc_from(pDesc, &desc);
+    // A host that shares Venus memory as host memory binds only linear images to it, here and in every opener.
+    linear = umd_texture_can_be_linear(&desc);
+    if (primary && !linear)
+    {
+        umd_log("primary: %u levels, %u layers, %u samples: a scanout is one of each",
+                desc.mip_levels,
+                desc.array_size,
+                desc.sample_count);
+        return E_INVALIDARG;
+    }
+    if (!linear)
+    {
+        umd_log("shared texture %ux%u: %u levels, %u layers, %u samples: not linear, so a host that shares memory as "
+                "host memory cannot import it",
+                desc.width,
+                desc.height,
+                desc.mip_levels,
+                desc.array_size,
+                desc.sample_count);
+    }
+    desc.flags = linear ? VIOGPU3D_SURFACE_FLAG_LINEAR : 0;
     umd_resource_record_fill(&record, &desc);
     memset(&create, 0, sizeof(create));
     create.sType = UMD_VK_STRUCTURE_TYPE_D3DDDI_CREATE_RESOURCE_MESA;
@@ -356,7 +383,7 @@ HRESULT triton_backend_create_shared_texture(PTRITON_DEVICE pD,
     hr = DXVKUmdCreateTexture2D((ID3D11Device *)pD->pDev1,
                                 &desc1,
                                 pInitialData,
-                                primary ? DXVK_UMD_TEXTURE_LINEAR : 0,
+                                linear ? DXVK_UMD_TEXTURE_LINEAR : 0,
                                 &texture);
     umd_vk_pending_end(&pending);
     if (FAILED(hr))
@@ -394,6 +421,7 @@ HRESULT triton_backend_open_shared_texture(PTRITON_DEVICE pD,
     struct umd_vk_pending pending;
     D3D11_TEXTURE2D_DESC1 desc1;
     ID3D11Texture2D1 *texture = NULL;
+    UINT importFlags;
     HRESULT hr;
 
     *ppResource = NULL;
@@ -440,8 +468,10 @@ HRESULT triton_backend_open_shared_texture(PTRITON_DEVICE pD,
     pending.kind = UMD_VK_ALLOC_IMPORT;
     pending.ext = (VkBaseOutStructure *)&open;
     pending.hRTDevice = pD->hRTDevice.handle;
+    // An import takes its maker's layout.
+    importFlags = DXVK_UMD_TEXTURE_IMPORT | ((desc.flags & VIOGPU3D_SURFACE_FLAG_LINEAR) ? DXVK_UMD_TEXTURE_LINEAR : 0);
     umd_vk_pending_begin(&pending);
-    hr = DXVKUmdCreateTexture2D((ID3D11Device *)pD->pDev1, &desc1, NULL, DXVK_UMD_TEXTURE_IMPORT, &texture);
+    hr = DXVKUmdCreateTexture2D((ID3D11Device *)pD->pDev1, &desc1, NULL, importFlags, &texture);
     umd_vk_pending_end(&pending);
     if (FAILED(hr) || !pending.chained)
     {
@@ -458,6 +488,14 @@ HRESULT triton_backend_open_shared_texture(PTRITON_DEVICE pD,
         return FAILED(hr) ? hr : E_FAIL;
     }
 
+    if (desc.kind == VIOGPU3D_SURFACE_KERNEL_BLOB)
+    {
+        umd_log("OpenResource: the kernel driver's surface of type %u, %ux%u, rows of %u bytes",
+                desc.standard_type,
+                desc.width,
+                desc.height,
+                desc.pitch);
+    }
     pDesc->width = desc.width;
     pDesc->height = desc.height;
     pDesc->mip_levels = desc.mip_levels;
