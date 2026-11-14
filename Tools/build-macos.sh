@@ -20,7 +20,6 @@ VENUS_ICD_DIR="${VENUS_ICD_DIR:-$(dirname "${REPO}")/mesa-venus-windows-build/bu
 VENUS_ICD_ARM64EC_DIR="${VENUS_ICD_ARM64EC_DIR:-$(dirname "${REPO}")/mesa-venus-windows-arm64ec-build/build/src/virtio/vulkan}"
 VENUS_ICD_X86_DIR="${VENUS_ICD_X86_DIR:-$(dirname "${REPO}")/mesa-venus-windows-x86-build/build/src/virtio/vulkan}"
 MINGW_DIR="${MINGW_DIR:-$(dirname "${REPO}")/llvm-mingw}"
-DXVK_PATCHES="${DXVK_PATCHES:-$(dirname "${REPO}")/dxvk-patches}"
 UMD_DIR="${REPO}/viogpu3d/umd"
 UMD_DLL=viogpu3d_umd.dll
 UMD_DLL_X86=viogpu3d_umd_x86.dll
@@ -42,7 +41,7 @@ usage() {
 Usage:
   Tools/build-macos.sh fetch
   Tools/build-macos.sh [--config "Win11 Release"|"Win10 Release"] [--test-sign] [--venus-icd DIR]
-                       [--venus-icd-arm64ec DIR] [--venus-icd-x86 DIR] [--d3d-umd] [--dxvk-patches DIR]
+                       [--venus-icd-arm64ec DIR] [--venus-icd-x86 DIR] [--d3d-umd]
                        [project.vcxproj ...]
 
 fetch downloads the WDK and Windows SDK NuGet packages for ARM64 (${KIT_VERSION}) from
@@ -76,10 +75,7 @@ llvm-mingw: DXVK from the viogpu3d/umd/dxvk submodule with meson and its umd opt
 driver's own sources, each for aarch64-w64-mingw32, arm64ec-w64-mingw32 and i686-w64-mingw32. The
 first two make the ARM64X ${UMD_DLL}, the last ${UMD_DLL_X86}. Their file version is the
 DriverVer version of this build. Without --d3d-umd the package takes the files an earlier
---d3d-umd left there, and the package check refuses a DLL whose version differs. A DXVK checkout
-that has no umd meson option yet gets the patches of a folder first (*.patch, in name order,
-applied with patch -p1 to a copy): the one --dxvk-patches names, by default dxvk-patches next to
-this clone.
+--d3d-umd left there, and the package check refuses a DLL whose version differs.
 
 ${UMD_NOTICES}, written into the package, carries the licences of the third-party code in
 these drivers: Triton and DXVK with the DXVK subprojects linked in, from this tree and the DXVK copy of
@@ -96,7 +92,7 @@ machine trusts. No keychain is used.
 
 Needs clang, lld-link, llvm-lib and llvm-rc from one LLVM (tested with 22.1 and 23.1),
 xmllint, curl, unzip and openssl, and osslsigncode for --test-sign. --d3d-umd also needs the
-llvm-mingw of fetch, meson, rsync, patch and glslang (or glslangValidator) on PATH, and the DXVK
+llvm-mingw of fetch, meson, rsync and glslang (or glslangValidator) on PATH, and the DXVK
 submodule checked out with its own submodules. Packing viogpu3d needs ninja, python3 and the
 llvm-mingw of fetch. WDK_DIR
 and this clone must be on a case-insensitive volume (the macOS default): the kit's headers include
@@ -114,7 +110,6 @@ Environment:
   VENUS_ICD_ARM64EC_DIR, VENUS_ICD_X86_DIR
                      the folders --venus-icd-arm64ec and --venus-icd-x86 name
   MINGW_DIR          unpacked llvm-mingw (default: llvm-mingw next to this clone, ${MINGW_DIR})
-  DXVK_PATCHES       the folder --dxvk-patches names (default: ${DXVK_PATCHES})
 
 Left for Windows:
   tracewpp           no WPP: a project whose WPP configuration is DbgPrint(LEVEL, (MSG, ...))
@@ -622,25 +617,13 @@ umd_ddi_headers() {
     done
 }
 
-# The submodule, with the patches until DXVK has the umd option. A file the patches leave as it was keeps its time, so
-# ninja rebuilds only what changed.
 umd_dxvk_source() {
-    local out=$1 sub="${UMD_DIR}/dxvk" patch patches
-    [[ -f "${sub}/meson.build" && -f "${sub}/include/vulkan/include/vulkan/vulkan_core.h" ]] ||
-        die "no DXVK in ${sub}; run git submodule update --init --recursive viogpu3d/umd/dxvk"
-    mkdir -p "${out}/dxvk-stage" "${out}/dxvk-src"
-    rsync -a --delete --exclude .git "${sub}/" "${out}/dxvk-stage/"
-    if ! grep -q "option('umd'" "${out}/dxvk-stage/meson_options.txt"; then
-        patches=("${DXVK_PATCHES}"/*.patch)
-        [[ -f "${patches[0]}" ]] ||
-            die "the DXVK in ${sub} has no umd meson option and ${DXVK_PATCHES} has no *.patch to add it;" \
-                "pass --dxvk-patches with the patches"
-        for patch in "${patches[@]}"; do
-            patch -s -p1 -d "${out}/dxvk-stage" <"${patch}" || die "${patch} does not apply to ${sub}"
-            note "applied $(basename "${patch}") to DXVK"
-        done
-    fi
-    rsync -rlp --checksum --delete "${out}/dxvk-stage/" "${out}/dxvk-src/"
+    local out=$1 sub="${UMD_DIR}/dxvk"
+    [[ -f "${sub}/meson.build" && -f "${sub}/include/vulkan/include/vulkan/vulkan_core.h" ]] &&
+        grep -q "option('umd'" "${sub}/meson_options.txt" ||
+        die "no DXVK with the umd option in ${sub}; run git submodule update --init --recursive viogpu3d/umd/dxvk"
+    mkdir -p "${out}/dxvk-src"
+    rsync -rlp --checksum --delete --exclude .git "${sub}/" "${out}/dxvk-src/"
 }
 
 # umd_dxvk_build <out> <llvm-mingw bin> <arch>: DXVK's static libraries for one target, in <out>/<arch>/dxvk-build. A
@@ -1006,7 +989,7 @@ write_notices() {
         printf '\n== Triton, src/virtio/neptune/triton of https://github.com/osy/virtio-win-mesa, changed: %s ==\n\n' \
             "${UMD_DLL}, ${UMD_DLL_X86}"
         cat "${UMD_DIR}/triton/LICENSE"
-        printf '\n== DXVK, https://github.com/anonymix007/dxvk branch umd, changed: %s ==\n\n' \
+        printf '\n== DXVK, https://github.com/osmates/dxvk branch osmates, changed: %s ==\n\n' \
             "${UMD_DLL}, ${UMD_DLL_X86}"
         cat "${src}/LICENSE"
         for licence in "${src}"/subprojects/*/LICENSE; do
@@ -1269,10 +1252,6 @@ main() {
                 shift
                 ;;
             --d3d-umd) d3d_umd=true ;;
-            --dxvk-patches)
-                DXVK_PATCHES=${2:?}
-                shift
-                ;;
             -h | --help)
                 usage
                 return

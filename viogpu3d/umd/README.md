@@ -54,13 +54,11 @@ The Direct3D 10 and 11 driver of viogpu3d, on DXVK and Mesa's Venus Vulkan drive
 
 ## DXVK
 
-- `dxvk` is a submodule of anonymix007's DXVK, branch `umd` (zlib), at `fd4bee93fd0f`, unchanged. That branch builds
-  DXVK for a driver behind the `DXVK_BUILD_UMD` define: an imported instance, no WSI, no global instance, no swapchain.
-- It moves to an `osmates/dxvk` fork once OSMates changes it. OSMates already needs three changes: a meson `umd`
-  option that builds static D3D11 and DXGI libraries, the entry points of `src/d3d11/d3d11_umd.h`
-  (`DXVKUmdCreateFactory`, `DXVKUmdCreateTexture2D`), and linear scanout textures. Until the fork exists they are
-  patches kept outside this repository, which the build applies to a copy of the submodule; the submodule itself
-  stays as it is. A build without the `umd` option is unchanged by them.
+- `dxvk` is a submodule of OSMates' DXVK fork, github.com/osmates/dxvk branch `osmates` (zlib): anonymix007's branch
+  `umd` at `fd4bee93fd0f`, which builds DXVK for a driver behind the `DXVK_BUILD_UMD` define (an imported instance,
+  no WSI, no global instance, no swapchain), and two commits on it: a meson `umd` option that builds static D3D11 and
+  DXGI libraries, and the entry points of `src/d3d11/d3d11_umd.h` (`DXVKUmdCreateFactory`, `DXVKUmdCreateTexture2D`)
+  with linear scanout textures. A build without the `umd` option is unchanged by them.
 - The build runs DXVK's meson three times on that copy: aarch64-w64-mingw32, arm64ec-w64-mingw32 and
   i686-w64-mingw32. ARM64EC gets the CPU family `aarch64`: its code is ARM64 code, and DXVK's own ARM64EC paths key on
   `__arm64ec__`.
@@ -74,9 +72,8 @@ Tools/build-macos.sh --d3d-umd --venus-icd <aarch64 Mesa build>/src/virtio/vulka
 ```
 
 - Needs the kits and the llvm-mingw of `Tools/build-macos.sh fetch` (llvm-mingw next to this clone, or `MINGW_DIR`),
-  meson, ninja, glslang, rsync, patch and python3, and
+  meson, ninja, glslang, rsync and python3, and
   `git submodule update --init --recursive viogpu3d/umd/dxvk`.
-- Needs the DXVK patches above in `dxvk-patches` next to this clone, or in the folder `--dxvk-patches` names.
 - Needs three Mesa builds of the `venus-windows` branch of github.com/osmates/mesa, each configured with
   `-Dvulkan-icd-dir=bin` and the same other options: for aarch64-w64-mingw32, for arm64ec-w64-mingw32 with the Meson
   CPU family `aarch64`, and for i686-w64-mingw32. The package build links the first two into one ARM64X
