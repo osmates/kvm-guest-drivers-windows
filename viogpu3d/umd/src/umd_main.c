@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#include "umd.h"
+#include "umd12.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -52,7 +52,10 @@ int __cdecl DXVK_umd_log_output(const char *line)
     return 0;
 }
 
-HRESULT APIENTRY OpenAdapter10_2(D3D10DDIARG_OPENADAPTER *pOpenData)
+HRESULT umd_adapter_open(HANDLE hRTAdapter,
+                         const D3DDDI_ADAPTERCALLBACKS *callbacks,
+                         const char *entry,
+                         struct umd_adapter **out)
 {
     VIRTIO_WDDM_ADAPTER_INFO info;
     D3DDDICB_QUERYADAPTERINFO query;
@@ -60,26 +63,25 @@ HRESULT APIENTRY OpenAdapter10_2(D3D10DDIARG_OPENADAPTER *pOpenData)
     struct umd_adapter *adapter;
     HRESULT hr;
 
-    if (pOpenData == NULL || pOpenData->pAdapterCallbacks == NULL ||
-        pOpenData->pAdapterCallbacks->pfnQueryAdapterInfoCb == NULL)
+    *out = NULL;
+    if (callbacks == NULL || callbacks->pfnQueryAdapterInfoCb == NULL)
     {
         return E_INVALIDARG;
     }
-
     memset(&info, 0, sizeof(info));
     memset(&query, 0, sizeof(query));
     query.pPrivateDriverData = &info;
     query.PrivateDriverDataSize = sizeof(info);
-    hr = pOpenData->pAdapterCallbacks->pfnQueryAdapterInfoCb(pOpenData->hRTAdapter.handle, &query);
+    hr = callbacks->pfnQueryAdapterInfoCb(hRTAdapter, &query);
     if (FAILED(hr))
     {
-        umd_log("OpenAdapter10_2: the kernel driver's adapter info query failed 0x%08lx", (unsigned long)hr);
+        umd_log("%s: the kernel driver's adapter info query failed 0x%08lx", entry, (unsigned long)hr);
         return hr;
     }
     check = umd_adapter_info_check(&info, sizeof(info), &info);
     if (check != UMD_ADAPTER_OK)
     {
-        umd_log("OpenAdapter10_2: refused: %s", umd_adapter_check_text(check));
+        umd_log("%s: refused: %s", entry, umd_adapter_check_text(check));
         return E_FAIL;
     }
 
@@ -88,16 +90,56 @@ HRESULT APIENTRY OpenAdapter10_2(D3D10DDIARG_OPENADAPTER *pOpenData)
     {
         return E_OUTOFMEMORY;
     }
-    adapter->hRTAdapter = pOpenData->hRTAdapter.handle;
-    adapter->pAdapterCallbacks = pOpenData->pAdapterCallbacks;
+    adapter->hRTAdapter = hRTAdapter;
+    adapter->pAdapterCallbacks = callbacks;
     adapter->info = info;
     adapter->luid = umd_adapter_luid(&info);
-    umd_log("OpenAdapter10_2: adapter LUID %08lx-%08lx, capability sets 0x%llx",
+    umd_log("%s: adapter LUID %08lx-%08lx, capability sets 0x%llx",
+            entry,
             (unsigned long)adapter->luid.HighPart,
             (unsigned long)adapter->luid.LowPart,
             (unsigned long long)info.CapsetMask);
+    *out = adapter;
+    return S_OK;
+}
 
+HRESULT APIENTRY OpenAdapter10_2(D3D10DDIARG_OPENADAPTER *pOpenData)
+{
+    struct umd_adapter *adapter;
+    HRESULT hr;
+
+    if (pOpenData == NULL)
+    {
+        return E_INVALIDARG;
+    }
+    hr = umd_adapter_open(pOpenData->hRTAdapter.handle, pOpenData->pAdapterCallbacks, "OpenAdapter10_2", &adapter);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
     hr = tritonOpenAdapter10_2(pOpenData, adapter);
+    if (FAILED(hr))
+    {
+        HeapFree(GetProcessHeap(), 0, adapter);
+    }
+    return hr;
+}
+
+HRESULT APIENTRY OpenAdapter12(D3D12DDIARG_OPENADAPTER *pOpenData)
+{
+    struct umd_adapter *adapter;
+    HRESULT hr;
+
+    if (pOpenData == NULL)
+    {
+        return E_INVALIDARG;
+    }
+    hr = umd_adapter_open(pOpenData->hRTAdapter.handle, pOpenData->pAdapterCallbacks, "OpenAdapter12", &adapter);
+    if (FAILED(hr))
+    {
+        return hr;
+    }
+    hr = tritonOpenAdapter12(pOpenData, adapter);
     if (FAILED(hr))
     {
         HeapFree(GetProcessHeap(), 0, adapter);

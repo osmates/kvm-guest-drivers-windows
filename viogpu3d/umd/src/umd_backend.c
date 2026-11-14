@@ -49,23 +49,26 @@ void triton_backend_log(const char *line)
     umd_log_line(line);
 }
 
-// VIOGPU3D_UMD_DEBUG=present_timing; VIOGPU3D_UMD_PRESENT_GATE_TRACE=<ms>.
+// VIOGPU3D_UMD_DEBUG=present_timing,d3d12_list_migration,no_d3d12_xqueue_order (any of them);
+// VIOGPU3D_UMD_PRESENT_GATE_TRACE=<ms>.
 static INIT_ONCE umd_env_once = INIT_ONCE_STATIC_INIT;
 static UINT umd_debug_flags;
 static int umd_gate_trace_ms;
 
 static BOOL CALLBACK umd_env_read(PINIT_ONCE once, PVOID param, PVOID *context)
 {
-    char value[64];
+    char value[128];
     DWORD length;
 
     (void)once;
     (void)param;
     (void)context;
     length = GetEnvironmentVariableA("VIOGPU3D_UMD_DEBUG", value, sizeof(value));
-    if (length > 0 && length < sizeof(value) && strstr(value, "present_timing") != NULL)
+    if (length > 0 && length < sizeof(value))
     {
-        umd_debug_flags |= TRITON_DEBUG_PRESENT_TIMING;
+        umd_debug_flags |= strstr(value, "present_timing") != NULL ? TRITON_DEBUG_PRESENT_TIMING : 0;
+        umd_debug_flags |= strstr(value, "d3d12_list_migration") != NULL ? TRITON_DEBUG_D3D12_LIST_MIGRATION : 0;
+        umd_debug_flags |= strstr(value, "no_d3d12_xqueue_order") != NULL ? TRITON_DEBUG_NO_D3D12_XQUEUE_ORDER : 0;
     }
     length = GetEnvironmentVariableA("VIOGPU3D_UMD_PRESENT_GATE_TRACE", value, sizeof(value));
     if (length > 0 && length < sizeof(value))

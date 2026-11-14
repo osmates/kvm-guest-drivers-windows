@@ -5,6 +5,7 @@
 
 #include "umd_adapter_info.h"
 #include "umd_blob_map.h"
+#include "umd_d3d12.h"
 #include "umd_format.h"
 #include "umd_path.h"
 #include "umd_pipeline.h"
@@ -779,6 +780,361 @@ static void anOpenAdapterKeepsTheOneInstanceThroughOthersChurn(void)
     CHECK(atomic_load(&sharedFreed) == 1 && atomic_load(&sharedLive) == 0);
 }
 
+static struct umd_d3d12_texture d3d12_back_buffer(void)
+{
+    struct umd_d3d12_texture t;
+
+    memset(&t, 0, sizeof(t));
+    t.width = 2880;
+    t.height = 1800;
+    t.depth_or_array_size = 1;
+    t.mip_levels = 1;
+    t.format = UMD_DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    t.sample_count = 1;
+    t.flags = UMD_D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    return t;
+}
+
+static void d3d12SharedSurfacesAreOneLinearPlane(void)
+{
+    struct umd_d3d12_texture t = d3d12_back_buffer();
+    struct umd_texture_desc desc;
+
+    CHECK(umd_d3d12_shared_desc(&t, TRUE, &desc) == UMD_D3D12_SHARED_OK);
+    CHECK(desc.width == 2880 && desc.height == 1800);
+    CHECK(desc.mip_levels == 1 && desc.array_size == 1 && desc.sample_count == 1);
+    // Shared and scanout textures take the UNORM format, as the D3D10 and 11 driver's do.
+    CHECK(desc.format == UMD_DXGI_FORMAT_B8G8R8A8_UNORM);
+    CHECK(desc.bind_flags == (VIOGPU3D_D3D11_BIND_SHADER_RESOURCE | VIOGPU3D_D3D11_BIND_RENDER_TARGET));
+    CHECK(desc.usage == VIOGPU3D_D3D11_USAGE_DEFAULT);
+    CHECK(desc.misc_flags == VIOGPU3D_D3D11_RESOURCE_MISC_SHARED);
+    CHECK(desc.kind == VIOGPU3D_SURFACE_SHARED_TEXTURE);
+    CHECK(desc.flags == VIOGPU3D_SURFACE_FLAG_LINEAR);
+
+    t.flags = UMD_D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS | UMD_D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
+    CHECK(umd_d3d12_shared_desc(&t, FALSE, &desc) == UMD_D3D12_SHARED_OK);
+    CHECK(desc.bind_flags == UMD_D3D11_BIND_UNORDERED_ACCESS);
+
+    t = d3d12_back_buffer();
+    t.mip_levels = 2;
+    CHECK(umd_d3d12_shared_desc(&t, FALSE, &desc) == UMD_D3D12_SHARED_NOT_ONE_PLANE);
+    t = d3d12_back_buffer();
+    t.depth_or_array_size = 2;
+    CHECK(umd_d3d12_shared_desc(&t, FALSE, &desc) == UMD_D3D12_SHARED_NOT_ONE_PLANE);
+    t = d3d12_back_buffer();
+    t.sample_count = 4;
+    CHECK(umd_d3d12_shared_desc(&t, FALSE, &desc) == UMD_D3D12_SHARED_NOT_ONE_PLANE);
+    t = d3d12_back_buffer();
+    t.flags |= UMD_D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+    CHECK(umd_d3d12_shared_desc(&t, FALSE, &desc) == UMD_D3D12_SHARED_DEPTH_STENCIL);
+    t = d3d12_back_buffer();
+    t.width = 16385;
+    CHECK(umd_d3d12_shared_desc(&t, FALSE, &desc) == UMD_D3D12_SHARED_TOO_LARGE);
+    t.width = 1ull << 32;
+    CHECK(umd_d3d12_shared_desc(&t, FALSE, &desc) == UMD_D3D12_SHARED_TOO_LARGE);
+    t = d3d12_back_buffer();
+    t.height = 0;
+    CHECK(umd_d3d12_shared_desc(&t, FALSE, &desc) == UMD_D3D12_SHARED_TOO_LARGE);
+
+    // A primary also needs a format the kernel driver scans out; R16G16B16A16_FLOAT (10) is none.
+    t = d3d12_back_buffer();
+    t.format = 10;
+    CHECK(umd_d3d12_shared_desc(&t, FALSE, &desc) == UMD_D3D12_SHARED_OK);
+    CHECK(umd_d3d12_shared_desc(&t, TRUE, &desc) == UMD_D3D12_SHARED_NOT_SCANOUT);
+    CHECK(strcmp(umd_d3d12_shared_check_text(UMD_D3D12_SHARED_OK), "ok") == 0);
+    CHECK(strcmp(umd_d3d12_shared_check_text((enum umd_d3d12_shared_check)99), "unknown") == 0);
+    for (int c = UMD_D3D12_SHARED_NOT_ONE_PLANE; c <= UMD_D3D12_SHARED_NOT_SCANOUT; c++)
+    {
+        CHECK(strcmp(umd_d3d12_shared_check_text((enum umd_d3d12_shared_check)c), "unknown") != 0);
+    }
+}
+
+// A Direct3D 12 back buffer DWM opens through the D3D10 and 11 driver: its record reads back as it was written.
+static void d3d12BackBuffersOpenInTheD3D11Driver(void)
+{
+    struct umd_d3d12_texture t = d3d12_back_buffer();
+    struct umd_texture_desc made, got;
+    struct shared_allocation a = shared_allocation();
+    VIRTIO_WDDM_RESOURCE_INFO info;
+
+    CHECK(umd_d3d12_shared_desc(&t, TRUE, &made) == UMD_D3D12_SHARED_OK);
+    umd_resource_record_fill(&a.record, &made);
+    CHECK(umd_resource_record_open(&a, sizeof(a), 0x40000042u, &info, &got) == UMD_OPEN_OK);
+    CHECK(memcmp(&made, &got, sizeof(made)) == 0);
+    CHECK(umd_texture_can_be_linear(&got));
+}
+
+static void d3d12ImageUsageFollowsTheFlags(void)
+{
+    const VkImageUsageFlags copies = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+
+    CHECK(umd_d3d12_shared_usage(0) == (copies | VK_IMAGE_USAGE_SAMPLED_BIT));
+    CHECK(umd_d3d12_shared_usage(UMD_D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) ==
+          (copies | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT));
+    CHECK(umd_d3d12_shared_usage(UMD_D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS |
+                                 UMD_D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) ==
+          (copies | VK_IMAGE_USAGE_STORAGE_BIT));
+}
+
+static void d3d12ViewFormatsAddSrgbFor8Bit(void)
+{
+    VkFormat formats[2];
+
+    CHECK(umd_d3d12_view_formats(UMD_DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, formats, 2) == 2);
+    CHECK(formats[0] == VK_FORMAT_R8G8B8A8_UNORM && formats[1] == VK_FORMAT_R8G8B8A8_SRGB);
+    CHECK(umd_d3d12_view_formats(UMD_DXGI_FORMAT_B8G8R8X8_UNORM, formats, 2) == 2);
+    CHECK(formats[0] == VK_FORMAT_B8G8R8A8_UNORM && formats[1] == VK_FORMAT_B8G8R8A8_SRGB);
+    CHECK(umd_d3d12_view_formats(UMD_DXGI_FORMAT_R10G10B10A2_UNORM, formats, 2) == 0);
+    CHECK(umd_d3d12_view_formats(UMD_DXGI_FORMAT_R8G8B8A8_UNORM, formats, 1) == 1);
+    CHECK(formats[0] == VK_FORMAT_R8G8B8A8_UNORM);
+}
+
+static VkPhysicalDeviceIDProperties device_with_luid(BOOL valid, LUID luid)
+{
+    VkPhysicalDeviceIDProperties id;
+
+    memset(&id, 0, sizeof(id));
+    id.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+    id.deviceLUIDValid = valid ? VK_TRUE : VK_FALSE;
+    memcpy(id.deviceLUID, &luid, sizeof(luid));
+    return id;
+}
+
+static void physicalDeviceIsTheAdaptersByLuid(void)
+{
+    LUID adapter = {0x00000002u, 0x00000001};
+    LUID other = {0x00000003u, 0x00000001};
+    VkPhysicalDeviceIDProperties ids[3];
+
+    ids[0] = device_with_luid(TRUE, other);
+    ids[1] = device_with_luid(TRUE, adapter);
+    ids[2] = device_with_luid(FALSE, adapter);
+    CHECK(umd_pick_physical_device(ids, 3, adapter) == 1);
+    CHECK(umd_pick_physical_device(ids, 1, adapter) == -1);
+    // No device knows its LUID: the only one there is.
+    ids[0] = device_with_luid(FALSE, other);
+    CHECK(umd_pick_physical_device(ids, 1, adapter) == 0);
+    ids[1] = device_with_luid(FALSE, other);
+    CHECK(umd_pick_physical_device(ids, 2, adapter) == -1);
+    CHECK(umd_pick_physical_device(ids, 0, adapter) == -1);
+    // The LUID's bytes in memory order: LowPart first.
+    ids[0] = device_with_luid(TRUE, adapter);
+    CHECK(ids[0].deviceLUID[0] == 0x02 && ids[0].deviceLUID[4] == 0x01);
+}
+
+static void memoryTypePrefersDeviceLocal(void)
+{
+    VkPhysicalDeviceMemoryProperties props;
+
+    memset(&props, 0, sizeof(props));
+    props.memoryTypeCount = 3;
+    props.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    props.memoryTypes[1].propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    props.memoryTypes[2].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+    CHECK(umd_pick_memory_type(0x7, &props, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == 2);
+    CHECK(umd_pick_memory_type(0x3, &props, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == 0);
+    CHECK(umd_pick_memory_type(0x2, &props, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == 1);
+    CHECK(umd_pick_memory_type(0x0, &props, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) == -1);
+    // Bits past the types there are mean nothing.
+    CHECK(umd_pick_memory_type(0x8, &props, 0) == -1);
+}
+
+static void emptyAllocationsNameNoMemory(void)
+{
+    VIRTIO_WDDM_CREATE_ALLOCATION create, zero;
+    VIRTIO_WDDM_RESOURCE_INFO info;
+    struct umd_texture_desc desc;
+
+    memset(&create, 0xab, sizeof(create));
+    umd_empty_allocation_fill(&create);
+    CHECK(create.Base.Tag == VIOGPU3D_ALLOCATE_EMPTY_TAG);
+    memset(&zero, 0, sizeof(zero));
+    zero.Base.Tag = VIOGPU3D_ALLOCATE_EMPTY_TAG;
+    CHECK(memcmp(&create, &zero, sizeof(create)) == 0);
+    // The kernel driver takes nothing shorter, and tells the kinds apart by the tag alone.
+    CHECK(sizeof(create) == 168);
+    CHECK(VIOGPU3D_ALLOCATE_EMPTY_TAG != VIRTIO_WDDM_ALLOCATE_BLOB_TAG);
+    CHECK(VIOGPU3D_ALLOCATE_EMPTY_TAG != VIRTIO_WDDM_ALLOCATE_3D_TAG);
+    CHECK(VIOGPU3D_ALLOCATE_EMPTY_TAG != VIRTIO_WDDM_CREATE_RESOURCE_TAG);
+    CHECK(memcmp("VG3DEMPT", &create.Base.Tag, 8) == 0);
+    // No other process opens one.
+    CHECK(umd_resource_record_open(&create, sizeof(create), 1, &info, &desc) == UMD_OPEN_NOT_BLOB);
+}
+
+static void venusAllocationsTakeTheCoreLayersForm(void)
+{
+    UINT8 callData[8], data0[16], data1[16];
+    int resource;
+    struct umd_kt_allocation_info venusInfos[2];
+    struct umd_kt_allocate venus;
+    struct umd_d3d12_allocation_info infos[UMD_D3D12_ALLOCATE_MAX];
+    struct umd_d3d12_allocate out;
+
+    memset(venusInfos, 0, sizeof(venusInfos));
+    venusInfos[0].hAllocation = 0x11;
+    venusInfos[0].pSystemMem = data0;
+    venusInfos[0].pPrivateDriverData = data0;
+    venusInfos[0].PrivateDriverDataSize = sizeof(data0);
+    venusInfos[0].VidPnSourceId = 2;
+    venusInfos[0].Flags = UMD_KT_ALLOCATION_PRIMARY;
+    venusInfos[1].pPrivateDriverData = data1;
+    venusInfos[1].PrivateDriverDataSize = 12;
+    // Stereo, and a bit d3dukmdt.h reserves, which has no meaning in the core layer's flags.
+    venusInfos[1].Flags = UMD_KT_ALLOCATION_STEREO | 0x80000000u;
+    memset(&venus, 0, sizeof(venus));
+    venus.pPrivateDriverData = callData;
+    venus.PrivateDriverDataSize = sizeof(callData);
+    venus.hResource = &resource;
+    venus.hKMResource = 0x77;
+    venus.NumAllocations = 2;
+    venus.pAllocationInfo = venusInfos;
+
+    memset(infos, 0xab, sizeof(infos));
+    memset(&out, 0xab, sizeof(out));
+    CHECK(umd_d3d12_allocate_args(&venus, infos, &out));
+    CHECK(out.pPrivateDriverData == callData);
+    CHECK(out.PrivateDriverDataSize == sizeof(callData));
+    CHECK(out.hResource == &resource);
+    // Out only: the core layer fills it.
+    CHECK(out.hKMResource == 0);
+    CHECK(out.NumAllocations == 2);
+    CHECK(out.pAllocationInfo == infos);
+    CHECK(infos[0].hAllocation == 0);
+    CHECK(infos[0].pSystemMem == data0);
+    CHECK(infos[0].pPrivateDriverData == data0);
+    CHECK(infos[0].PrivateDriverDataSize == sizeof(data0));
+    CHECK(infos[0].VidPnSourceId == 2);
+    CHECK(infos[0].Flags == UMD_D3D12_ALLOCATION_PRIMARY);
+    CHECK(infos[0].GpuVirtualAddress == 0 && infos[0].Priority == 0 && infos[0].Reserved[4] == 0);
+    CHECK(infos[1].pSystemMem == NULL);
+    CHECK(infos[1].pPrivateDriverData == data1);
+    CHECK(infos[1].PrivateDriverDataSize == 12);
+    CHECK(infos[1].VidPnSourceId == 0);
+    CHECK(infos[1].Flags == UMD_D3D12_ALLOCATION_STEREO);
+    // The rest of infos is cleared, not left as it was.
+    CHECK(infos[2].pPrivateDriverData == NULL && infos[3].Flags == 0);
+
+    // Venus's own memory carries no runtime resource; the call goes as it is.
+    venus.hResource = NULL;
+    CHECK(umd_d3d12_allocate_args(&venus, infos, &out));
+    CHECK(out.hResource == NULL);
+}
+
+static void allocateCallsOutOfBoundsAreRefused(void)
+{
+    struct umd_kt_allocation_info venusInfos[UMD_D3D12_ALLOCATE_MAX + 1];
+    struct umd_kt_allocate venus;
+    struct umd_d3d12_allocation_info infos[UMD_D3D12_ALLOCATE_MAX];
+    struct umd_d3d12_allocate out, untouched;
+
+    memset(venusInfos, 0, sizeof(venusInfos));
+    memset(&venus, 0, sizeof(venus));
+    venus.pAllocationInfo = venusInfos;
+    memset(&out, 0xcd, sizeof(out));
+    untouched = out;
+
+    venus.NumAllocations = 0;
+    CHECK(!umd_d3d12_allocate_args(&venus, infos, &out));
+    venus.NumAllocations = UMD_D3D12_ALLOCATE_MAX + 1;
+    CHECK(!umd_d3d12_allocate_args(&venus, infos, &out));
+    venus.NumAllocations = 1;
+    venus.pAllocationInfo = NULL;
+    CHECK(!umd_d3d12_allocate_args(&venus, infos, &out));
+    CHECK(memcmp(&out, &untouched, sizeof(out)) == 0);
+
+    venus.pAllocationInfo = venusInfos;
+    venus.NumAllocations = UMD_D3D12_ALLOCATE_MAX;
+    CHECK(umd_d3d12_allocate_args(&venus, infos, &out));
+    CHECK(out.NumAllocations == UMD_D3D12_ALLOCATE_MAX);
+}
+
+static void allocationHandlesGoBackToVenus(void)
+{
+    struct umd_kt_allocation_info venusInfos[2];
+    struct umd_kt_allocate venus;
+    struct umd_d3d12_allocation_info infos[UMD_D3D12_ALLOCATE_MAX];
+    struct umd_d3d12_allocate out;
+
+    memset(venusInfos, 0, sizeof(venusInfos));
+    memset(&venus, 0, sizeof(venus));
+    venus.NumAllocations = 2;
+    venus.pAllocationInfo = venusInfos;
+    CHECK(umd_d3d12_allocate_args(&venus, infos, &out));
+    // What the core layer writes.
+    out.hKMResource = 0x40000042;
+    infos[0].hAllocation = 0x40000081;
+    infos[1].hAllocation = 0x40000082;
+    infos[2].hAllocation = 0x40000083;
+    umd_d3d12_allocate_results(&out, &venus);
+    CHECK(venus.hKMResource == 0x40000042);
+    CHECK(venusInfos[0].hAllocation == 0x40000081);
+    CHECK(venusInfos[1].hAllocation == 0x40000082);
+}
+
+static void deallocationsTakeTheCoreLayersForm(void)
+{
+    const UINT32 handles[2] = {0x40000081, 0x40000082};
+    int resource;
+    struct umd_kt_deallocate venus;
+    struct umd_d3d12_deallocate out;
+
+    memset(&venus, 0, sizeof(venus));
+    venus.NumAllocations = 2;
+    venus.HandleList = handles;
+    memset(&out, 0xab, sizeof(out));
+    umd_d3d12_deallocate_args(&venus, &out);
+    CHECK(out.hResource == NULL);
+    CHECK(out.NumAllocations == 2);
+    CHECK(out.HandleList == handles);
+    // D3D12DDI_DEALLOCATE_FLAGS_0022_NONE: D3DDDICB_DEALLOCATE has no flags to carry over.
+    CHECK(out.Flags == 0);
+
+    venus.hResource = &resource;
+    venus.NumAllocations = 0;
+    venus.HandleList = NULL;
+    umd_d3d12_deallocate_args(&venus, &out);
+    CHECK(out.hResource == &resource);
+    CHECK(out.NumAllocations == 0);
+    CHECK(out.HandleList == NULL);
+}
+
+static void vkd3dCacheGoesUnderLocalAppData(void)
+{
+    WCHAR folder[64];
+
+    CHECK(umd_vkd3d_cache_rule(TRUE, L"C:\\Users\\a\\AppData\\Local", folder, 64) == UMD_CACHE_KEEP);
+    CHECK(umd_vkd3d_cache_rule(FALSE, L"C:\\Users\\a\\AppData\\Local", folder, 64) == UMD_CACHE_FOLDER);
+    CHECK(wcscmp(folder, L"C:\\Users\\a\\AppData\\Local\\viogpu3d\\vkd3d-proton") == 0);
+    CHECK(umd_vkd3d_cache_rule(FALSE, L"C:\\Users\\a\\AppData\\Local\\", folder, 64) == UMD_CACHE_FOLDER);
+    CHECK(wcscmp(folder, L"C:\\Users\\a\\AppData\\Local\\viogpu3d\\vkd3d-proton") == 0);
+    CHECK(umd_vkd3d_cache_rule(FALSE, L"\\\\server\\home\\Local", folder, 64) == UMD_CACHE_FOLDER);
+    CHECK(wcscmp(folder, L"\\\\server\\home\\Local\\viogpu3d\\vkd3d-proton") == 0);
+    // Unset, empty or relative: the cache stays off rather than in the current folder.
+    CHECK(umd_vkd3d_cache_rule(FALSE, NULL, folder, 64) == UMD_CACHE_OFF);
+    CHECK(umd_vkd3d_cache_rule(FALSE, L"", folder, 64) == UMD_CACHE_OFF);
+    CHECK(umd_vkd3d_cache_rule(FALSE, L"AppData", folder, 64) == UMD_CACHE_OFF);
+    CHECK(umd_vkd3d_cache_rule(FALSE, L"\\", folder, 64) == UMD_CACHE_OFF);
+    // Too long for the buffer: off, with no partial path.
+    CHECK(umd_vkd3d_cache_rule(FALSE, L"C:\\Users\\a\\AppData\\Local", folder, 30) == UMD_CACHE_OFF);
+    CHECK(umd_vkd3d_cache_rule(FALSE, L"C:\\Users\\a\\AppData\\Local", folder, 46) == UMD_CACHE_OFF);
+    CHECK(folder[0] == 0);
+    CHECK(umd_vkd3d_cache_rule(FALSE, L"C:\\Users\\a\\AppData\\Local", folder, 47) == UMD_CACHE_FOLDER);
+}
+
+static void eachDriverLoadsItsOwnVkd3d(void)
+{
+    WCHAR out[260];
+    const WCHAR *arm64x = L"C:\\Windows\\System32\\DriverStore\\FileRepository\\viogpu3d.inf_arm64_1\\"
+                          L"viogpu3d_umd.dll";
+    const WCHAR *want = L"C:\\Windows\\System32\\DriverStore\\FileRepository\\viogpu3d.inf_arm64_1\\"
+                        L"viogpu3d_vkd3d.dll";
+
+    CHECK(wcscmp(umd_vkd3d_name(FALSE), L"viogpu3d_vkd3d.dll") == 0);
+    CHECK(wcscmp(umd_vkd3d_name(TRUE), L"viogpu3d_vkd3d_x86.dll") == 0);
+    CHECK(umd_path_beside(arm64x, umd_vkd3d_name(FALSE), out, 260));
+    CHECK(wcscmp(out, want) == 0);
+}
+
 int main(void)
 {
     adapterWithVenusIsTaken();
@@ -807,6 +1163,19 @@ int main(void)
     reopenAfterTheLastCloseMakesANewOne();
     adaptersOpenAndCloseOnManyThreads();
     anOpenAdapterKeepsTheOneInstanceThroughOthersChurn();
+    d3d12SharedSurfacesAreOneLinearPlane();
+    d3d12BackBuffersOpenInTheD3D11Driver();
+    d3d12ImageUsageFollowsTheFlags();
+    d3d12ViewFormatsAddSrgbFor8Bit();
+    physicalDeviceIsTheAdaptersByLuid();
+    memoryTypePrefersDeviceLocal();
+    emptyAllocationsNameNoMemory();
+    venusAllocationsTakeTheCoreLayersForm();
+    allocateCallsOutOfBoundsAreRefused();
+    allocationHandlesGoBackToVenus();
+    deallocationsTakeTheCoreLayersForm();
+    vkd3dCacheGoesUnderLocalAppData();
+    eachDriverLoadsItsOwnVkd3d();
 
     printf("umd host tests: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

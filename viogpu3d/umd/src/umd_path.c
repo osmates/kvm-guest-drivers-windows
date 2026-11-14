@@ -62,3 +62,8 @@ const WCHAR *umd_icd_name(BOOL x86)
 {
     return x86 ? L"vulkan_virtio_x86.dll" : L"vulkan_virtio.dll";
 }
+
+const WCHAR *umd_vkd3d_name(BOOL x86)
+{
+    return x86 ? L"viogpu3d_vkd3d_x86.dll" : L"viogpu3d_vkd3d.dll";
+}

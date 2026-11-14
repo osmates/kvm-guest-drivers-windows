@@ -5,10 +5,14 @@
 
 #include "umd.h"
 #include "umd_blob_map.h"
+#include "umd_d3d12.h"
 #include "umd_path.h"
+
+#include "../triton/triton12.h"
 
 #include <d3d11_umd.h>
 
+#include <stddef.h>
 #include <string.h>
 
 // The loader-ICD interface version this driver speaks to the ICD, as the Vulkan loader would.
@@ -24,6 +28,7 @@ static PFN_vkGetDeviceProcAddr volatile umd_icd_gdpa;
 static PFN_vkAllocateMemory volatile umd_icd_allocate;
 
 static _Thread_local struct umd_vk_pending *umd_pending;
+static _Thread_local VkD3DDDICallbacksMESA *umd_instance_callbacks;
 
 static SRWLOCK umd_devices_lock = SRWLOCK_INIT;
 static struct umd_device *umd_devices;
@@ -98,6 +103,41 @@ static void umd_vk_capture_allocate(PFN_vkVoidFunction icdAllocate)
     }
 }
 
+void umd_vk_note_instance(VkInstance instance)
+{
+    if (umd_icd_gdpa == NULL && umd_icd_gipa != NULL && instance != VK_NULL_HANDLE)
+    {
+        umd_icd_gdpa = (PFN_vkGetDeviceProcAddr)umd_icd_gipa(instance, "vkGetDeviceProcAddr");
+    }
+}
+
+// vkd3d-proton makes its instance itself, with no pNext: the runtime's callbacks go in here.
+static VKAPI_ATTR VkResult VKAPI_CALL umd_vk_create_instance(const VkInstanceCreateInfo *info,
+                                                             const VkAllocationCallbacks *allocator,
+                                                             VkInstance *instance)
+{
+    VkD3DDDICallbacksMESA *callbacks = umd_instance_callbacks;
+    PFN_vkCreateInstance create = (PFN_vkCreateInstance)umd_vk_icd_instance_proc(VK_NULL_HANDLE, "vkCreateInstance");
+    VkInstanceCreateInfo chained;
+    VkResult result;
+
+    if (create == NULL || info == NULL)
+    {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (callbacks == NULL)
+    {
+        return create(info, allocator, instance);
+    }
+    // Venus keeps this very struct, and writes to it, for the instance's life: no copy of it goes in the chain.
+    chained = *info;
+    callbacks->pNext = (void *)info->pNext;
+    chained.pNext = callbacks;
+    result = create(&chained, allocator, instance);
+    callbacks->pNext = NULL;
+    return result;
+}
+
 static PFN_vkVoidFunction umd_vk_hook(const char *name)
 {
     if (strcmp(name, "vkGetDeviceProcAddr") == 0)
@@ -135,6 +175,10 @@ static PFN_vkVoidFunction VKAPI_CALL umd_vk_get_instance_proc_addr(VkInstance in
     {
         return (PFN_vkVoidFunction)umd_vk_get_instance_proc_addr;
     }
+    if (strcmp(name, "vkCreateInstance") == 0 && instance == VK_NULL_HANDLE)
+    {
+        return (PFN_vkVoidFunction)umd_vk_create_instance;
+    }
     hook = umd_vk_hook(name);
     if (hook != NULL && instance != VK_NULL_HANDLE)
     {
@@ -142,9 +186,38 @@ static PFN_vkVoidFunction VKAPI_CALL umd_vk_get_instance_proc_addr(VkInstance in
         {
             umd_vk_capture_allocate(umd_icd_gipa(instance, name));
         }
+        umd_vk_note_instance(instance);
         return hook;
     }
     return umd_icd_gipa(instance, name);
+}
+
+PFN_vkGetInstanceProcAddr umd_vk_loader(void)
+{
+    InitOnceExecuteOnce(&umd_icd_once, umd_icd_load, NULL, NULL);
+    return umd_icd_gipa != NULL ? umd_vk_get_instance_proc_addr : NULL;
+}
+
+void umd_vk_instance_callbacks_begin(VkD3DDDICallbacksMESA *callbacks)
+{
+    umd_instance_callbacks = callbacks;
+}
+
+void umd_vk_instance_callbacks_end(void)
+{
+    umd_instance_callbacks = NULL;
+}
+
+PFN_vkVoidFunction umd_vk_icd_instance_proc(VkInstance instance, const char *name)
+{
+    return umd_icd_gipa != NULL ? umd_icd_gipa(instance, name) : NULL;
+}
+
+PFN_vkVoidFunction umd_vk_icd_device_proc(VkDevice device, const char *name)
+{
+    PFN_vkGetDeviceProcAddr gdpa = umd_icd_gdpa;
+
+    return gdpa != NULL ? gdpa(device, name) : NULL;
 }
 
 HRESULT umd_vk_create(const VkD3DDDICallbacksMESA *callbacks, struct umd_vk *vk)
@@ -239,38 +312,127 @@ void umd_vk_pending_end(struct umd_vk_pending *pending)
     }
 }
 
-static PFND3DDDI_ALLOCATECB umd_runtime_allocate(HANDLE hRTDevice)
+// A device's callbacks run only while the runtime keeps the device, so the entry outlives the lookup.
+static struct umd_device *umd_device_of(HANDLE hRTDevice)
 {
-    PFND3DDDI_ALLOCATECB allocate = NULL;
+    struct umd_device *found = NULL;
 
     AcquireSRWLockShared(&umd_devices_lock);
     for (struct umd_device *dev = umd_devices; dev != NULL; dev = dev->next)
     {
         if (dev->hRTDevice == hRTDevice)
         {
-            allocate = dev->runtimeAllocateCb;
+            found = dev;
             break;
         }
     }
     ReleaseSRWLockShared(&umd_devices_lock);
-    return allocate;
+    return found;
 }
 
 static PFND3DDDI_ESCAPECB umd_runtime_escape(HANDLE hRTDevice)
 {
-    PFND3DDDI_ESCAPECB escape = NULL;
+    struct umd_device *dev = umd_device_of(hRTDevice);
 
-    AcquireSRWLockShared(&umd_devices_lock);
-    for (struct umd_device *dev = umd_devices; dev != NULL; dev = dev->next)
+    return dev != NULL ? dev->runtimeEscapeCb : NULL;
+}
+
+// umd_d3d12.c maps Venus's allocate and deallocate calls to the core layer's on these mirrors, so each must be the
+// kits' struct field for field.
+#define UMD_SAME_FIELD(mirror, kit, field)                                                                             \
+    C_ASSERT(offsetof(mirror, field) == offsetof(kit, field) &&                                                        \
+             sizeof(((mirror *)NULL)->field) == sizeof(((kit *)NULL)->field))
+
+C_ASSERT(sizeof(struct umd_kt_allocation_info) == sizeof(D3DDDI_ALLOCATIONINFO));
+UMD_SAME_FIELD(struct umd_kt_allocation_info, D3DDDI_ALLOCATIONINFO, hAllocation);
+UMD_SAME_FIELD(struct umd_kt_allocation_info, D3DDDI_ALLOCATIONINFO, pSystemMem);
+UMD_SAME_FIELD(struct umd_kt_allocation_info, D3DDDI_ALLOCATIONINFO, pPrivateDriverData);
+UMD_SAME_FIELD(struct umd_kt_allocation_info, D3DDDI_ALLOCATIONINFO, PrivateDriverDataSize);
+UMD_SAME_FIELD(struct umd_kt_allocation_info, D3DDDI_ALLOCATIONINFO, VidPnSourceId);
+UMD_SAME_FIELD(struct umd_kt_allocation_info, D3DDDI_ALLOCATIONINFO, Flags);
+C_ASSERT(sizeof(struct umd_kt_allocate) == sizeof(D3DDDICB_ALLOCATE));
+UMD_SAME_FIELD(struct umd_kt_allocate, D3DDDICB_ALLOCATE, pPrivateDriverData);
+UMD_SAME_FIELD(struct umd_kt_allocate, D3DDDICB_ALLOCATE, PrivateDriverDataSize);
+UMD_SAME_FIELD(struct umd_kt_allocate, D3DDDICB_ALLOCATE, hResource);
+UMD_SAME_FIELD(struct umd_kt_allocate, D3DDDICB_ALLOCATE, hKMResource);
+UMD_SAME_FIELD(struct umd_kt_allocate, D3DDDICB_ALLOCATE, NumAllocations);
+UMD_SAME_FIELD(struct umd_kt_allocate, D3DDDICB_ALLOCATE, pAllocationInfo);
+C_ASSERT(sizeof(struct umd_kt_deallocate) == sizeof(D3DDDICB_DEALLOCATE));
+UMD_SAME_FIELD(struct umd_kt_deallocate, D3DDDICB_DEALLOCATE, hResource);
+UMD_SAME_FIELD(struct umd_kt_deallocate, D3DDDICB_DEALLOCATE, NumAllocations);
+UMD_SAME_FIELD(struct umd_kt_deallocate, D3DDDICB_DEALLOCATE, HandleList);
+C_ASSERT(sizeof(struct umd_d3d12_allocation_info) == sizeof(D3D12DDI_ALLOCATION_INFO_0022));
+UMD_SAME_FIELD(struct umd_d3d12_allocation_info, D3D12DDI_ALLOCATION_INFO_0022, hAllocation);
+UMD_SAME_FIELD(struct umd_d3d12_allocation_info, D3D12DDI_ALLOCATION_INFO_0022, pSystemMem);
+UMD_SAME_FIELD(struct umd_d3d12_allocation_info, D3D12DDI_ALLOCATION_INFO_0022, pPrivateDriverData);
+UMD_SAME_FIELD(struct umd_d3d12_allocation_info, D3D12DDI_ALLOCATION_INFO_0022, PrivateDriverDataSize);
+UMD_SAME_FIELD(struct umd_d3d12_allocation_info, D3D12DDI_ALLOCATION_INFO_0022, VidPnSourceId);
+UMD_SAME_FIELD(struct umd_d3d12_allocation_info, D3D12DDI_ALLOCATION_INFO_0022, Flags);
+UMD_SAME_FIELD(struct umd_d3d12_allocation_info, D3D12DDI_ALLOCATION_INFO_0022, GpuVirtualAddress);
+UMD_SAME_FIELD(struct umd_d3d12_allocation_info, D3D12DDI_ALLOCATION_INFO_0022, Priority);
+UMD_SAME_FIELD(struct umd_d3d12_allocation_info, D3D12DDI_ALLOCATION_INFO_0022, Reserved);
+C_ASSERT(sizeof(struct umd_d3d12_allocate) == sizeof(D3D12DDICB_ALLOCATE_0022));
+UMD_SAME_FIELD(struct umd_d3d12_allocate, D3D12DDICB_ALLOCATE_0022, pPrivateDriverData);
+UMD_SAME_FIELD(struct umd_d3d12_allocate, D3D12DDICB_ALLOCATE_0022, PrivateDriverDataSize);
+UMD_SAME_FIELD(struct umd_d3d12_allocate, D3D12DDICB_ALLOCATE_0022, hResource);
+UMD_SAME_FIELD(struct umd_d3d12_allocate, D3D12DDICB_ALLOCATE_0022, hKMResource);
+UMD_SAME_FIELD(struct umd_d3d12_allocate, D3D12DDICB_ALLOCATE_0022, NumAllocations);
+UMD_SAME_FIELD(struct umd_d3d12_allocate, D3D12DDICB_ALLOCATE_0022, pAllocationInfo);
+C_ASSERT(sizeof(struct umd_d3d12_deallocate) == sizeof(D3D12DDICB_DEALLOCATE_0022));
+UMD_SAME_FIELD(struct umd_d3d12_deallocate, D3D12DDICB_DEALLOCATE_0022, hResource);
+UMD_SAME_FIELD(struct umd_d3d12_deallocate, D3D12DDICB_DEALLOCATE_0022, NumAllocations);
+UMD_SAME_FIELD(struct umd_d3d12_deallocate, D3D12DDICB_DEALLOCATE_0022, HandleList);
+UMD_SAME_FIELD(struct umd_d3d12_deallocate, D3D12DDICB_DEALLOCATE_0022, Flags);
+C_ASSERT(UMD_D3D12_ALLOCATION_PRIMARY == D3D12DDI_ALLOCATION_INFO_FLAGS_0022_PRIMARY);
+C_ASSERT(UMD_D3D12_ALLOCATION_STEREO == D3D12DDI_ALLOCATION_INFO_FLAGS_0022_STEREO);
+
+static HRESULT umd_allocate12(const struct umd_device *dev, HANDLE hRTDevice, D3DDDICB_ALLOCATE *pData)
+{
+    struct umd_kt_allocate *venus = (struct umd_kt_allocate *)pData;
+    struct umd_d3d12_allocation_info infos[UMD_D3D12_ALLOCATE_MAX];
+    struct umd_d3d12_allocate allocate;
+    D3D12DDI_HRTDEVICE device;
+    HRESULT hr;
+
+    if (dev->coreLayer12->pfnAllocateCb == NULL)
     {
-        if (dev->hRTDevice == hRTDevice)
-        {
-            escape = dev->runtimeEscapeCb;
-            break;
-        }
+        return E_INVALIDARG;
     }
-    ReleaseSRWLockShared(&umd_devices_lock);
-    return escape;
+    if (!umd_d3d12_allocate_args(venus, infos, &allocate))
+    {
+        umd_log("allocate: refused %u allocations: the driver passes 1 to %u",
+                (unsigned)venus->NumAllocations,
+                (unsigned)UMD_D3D12_ALLOCATE_MAX);
+        return E_INVALIDARG;
+    }
+    device.handle = hRTDevice;
+    hr = dev->coreLayer12->pfnAllocateCb(device, (D3D12DDICB_ALLOCATE_0022 *)&allocate);
+    if (FAILED(hr))
+    {
+        // Venus passes no resource for its own memory and every VkDeviceMemory a runtime resource did not ask for.
+        umd_log("allocate: the core layer's pfnAllocateCb failed with hResource %s, %u allocation(s): 0x%08lx",
+                allocate.hResource == NULL ? "NULL" : "set",
+                (unsigned)allocate.NumAllocations,
+                (unsigned long)hr);
+        return hr;
+    }
+    umd_d3d12_allocate_results(&allocate, venus);
+    return hr;
+}
+
+static HRESULT APIENTRY umd_deallocate_cb(HANDLE hRTDevice, const D3DDDICB_DEALLOCATE *pData)
+{
+    struct umd_device *dev = umd_device_of(hRTDevice);
+    struct umd_d3d12_deallocate deallocate;
+    D3D12DDI_HRTDEVICE device;
+
+    if (dev == NULL || dev->coreLayer12 == NULL || dev->coreLayer12->pfnDeallocateCb == NULL || pData == NULL)
+    {
+        return E_INVALIDARG;
+    }
+    umd_d3d12_deallocate_args((const struct umd_kt_deallocate *)pData, &deallocate);
+    device.handle = hRTDevice;
+    return dev->coreLayer12->pfnDeallocateCb(device, (const D3D12DDICB_DEALLOCATE_0022 *)&deallocate);
 }
 
 // A blob map this process cannot hold is undone and fails, so that Venus never uses half a pointer.
@@ -313,15 +475,26 @@ static HRESULT APIENTRY umd_escape_cb(HANDLE hAdapter, const D3DDDICB_ESCAPE *pD
 // Venus allocates through this: it gives the kernel allocation of a resource being created back to that resource.
 static HRESULT APIENTRY umd_allocate_cb(HANDLE hRTDevice, D3DDDICB_ALLOCATE *pData)
 {
-    PFND3DDDI_ALLOCATECB allocate = umd_runtime_allocate(hRTDevice);
+    struct umd_device *dev = umd_device_of(hRTDevice);
     struct umd_vk_pending *pending = umd_pending;
     HRESULT hr;
 
-    if (allocate == NULL)
+    if (dev == NULL || pData == NULL)
     {
         return E_INVALIDARG;
     }
-    hr = allocate(hRTDevice, pData);
+    if (dev->coreLayer12 != NULL)
+    {
+        hr = umd_allocate12(dev, hRTDevice, pData);
+    }
+    else if (dev->runtimeAllocateCb != NULL)
+    {
+        hr = dev->runtimeAllocateCb(hRTDevice, pData);
+    }
+    else
+    {
+        return E_INVALIDARG;
+    }
     if (SUCCEEDED(hr) && pending != NULL && pending->pAllocation != NULL && pending->hRTDevice == hRTDevice &&
         pending->hRTResource != NULL && pData->hResource == pending->hRTResource && pData->NumAllocations == 1 &&
         pData->pAllocationInfo != NULL)
@@ -348,6 +521,16 @@ void umd_device_callbacks_init(struct umd_device *dev, HANDLE hRTDevice, const D
     dev->next = umd_devices;
     umd_devices = dev;
     ReleaseSRWLockExclusive(&umd_devices_lock);
+}
+
+void umd_device_callbacks_init12(struct umd_device *dev,
+                                 HANDLE hRTDevice,
+                                 const D3DDDI_DEVICECALLBACKS *runtime,
+                                 const struct D3D12DDI_CORELAYER_DEVICECALLBACKS_0022 *coreLayer)
+{
+    dev->coreLayer12 = coreLayer;
+    umd_device_callbacks_init(dev, hRTDevice, runtime);
+    dev->ktCallbacks.pfnDeallocateCb = umd_deallocate_cb;
 }
 
 void umd_device_callbacks_fini(struct umd_device *dev)

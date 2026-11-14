@@ -34,6 +34,8 @@ viogpu3d.sys = 1,,
 viogpu3d_umd.dll = 1,,
 viogpu3d_umd_x86.dll = 1,,
 viogpu3d_umd_notices.txt = 1,,
+viogpu3d_vkd3d.dll = 1,,
+viogpu3d_vkd3d_x86.dll = 1,,
 vulkan_virtio.dll = 1,,
 vulkan_virtio.json = 1,,
 vulkan_virtio_x86.dll = 1,,
@@ -52,12 +54,15 @@ vulkan_virtio_x86.json = 1,,
 [VioGpu3d_Files_Driver]
 viogpu3d.sys,,,2
 
-; The Direct3D 10 and 11 driver, on DXVK and Mesa's Venus Vulkan driver: one ARM64X DLL for ARM64 and x64
-; processes, one for x86 processes. The notices carry the licences of the third-party code in these drivers and in
-; the Vulkan drivers below.
+; The Direct3D 10, 11 and 12 driver, on DXVK, vkd3d-proton and Mesa's Venus Vulkan driver: one ARM64X DLL for ARM64
+; and x64 processes, one for x86 processes. vkd3d-proton (LGPL-2.1) stays a DLL of its own beside each, which the
+; Direct3D 12 driver loads. The notices carry the licences of the third-party code in these drivers and in the Vulkan
+; drivers below, and where vkd3d-proton's source is.
 [VioGpu3d_Files_UserMode]
 viogpu3d_umd.dll,,,2
 viogpu3d_umd_x86.dll,,,2
+viogpu3d_vkd3d.dll,,,2
+viogpu3d_vkd3d_x86.dll,,,2
 viogpu3d_umd_notices.txt,,,2
 
 ; Mesa's Venus Vulkan driver and its manifest: ARM64X for ARM64 and x64 processes, and for x86 processes.
@@ -94,10 +99,12 @@ AddReg = VioGpu3d_EventLog_Inst.AddReg
 HKR,,EventMessageFile,%REG_EXPAND_SZ%,"%%SystemRoot%%\System32\IoLogMsg.dll"
 HKR,,TypesSupported,%REG_DWORD%,7
 
-; The D3D runtimes read UserModeDriverName in the order D3D9, D3D10, D3D11, D3D12; the one driver fills every slot.
-; x64 processes load the ARM64EC view of the same ARM64X DLL. x86 processes read UserModeDriverNameWow, in the same
-; order. A driver that runs from the driver store names its DLLs there by full path (%13%), on Windows 10 1607 and
-; later; Windows 10 on Arm64 began with 1709. Their file versions are DriverVer's. The Vulkan loader reads
+; The D3D runtimes read UserModeDriverName in the order D3D9, D3D10, D3D11, D3D12; the one driver fills every slot,
+; with OpenAdapter10_2 for D3D10 and D3D11 and OpenAdapter12 for D3D12. It has no D3D9 OpenAdapter: the D3D9 slot names
+; it as Microsoft's own samples name a driver without that slot's entry point, and no documented key turns D3D9 over
+; to D3D9On12. x64 processes load the ARM64EC view of the same ARM64X DLL. x86 processes read UserModeDriverNameWow,
+; in the same order. A driver that runs from the driver store names its DLLs there by full path (%13%), on Windows 10
+; 1607 and later; Windows 10 on Arm64 began with 1709. Their file versions are DriverVer's. The Vulkan loader reads
 ; VulkanDriverName in the adapter's software key, or VulkanDriverNameWow in an x86 process: the full path of the ICD's
 ; manifest.
 [VioGpu3d_DeviceSettings]

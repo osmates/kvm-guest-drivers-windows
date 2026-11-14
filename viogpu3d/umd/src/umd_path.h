@@ -19,3 +19,6 @@ BOOL umd_path_beside(const WCHAR *modulePath, const WCHAR *name, WCHAR *out, siz
 // The Venus ICD the package installs beside the driver. One ARM64X DLL serves ARM64 and x64 processes; the x86 one
 // shares the folder under its own name.
 const WCHAR *umd_icd_name(BOOL x86);
+
+// vkd3d-proton, linked with its vkd3d.h API exported, beside the driver in the same way.
+const WCHAR *umd_vkd3d_name(BOOL x86);

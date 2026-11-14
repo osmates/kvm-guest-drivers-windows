@@ -61,12 +61,16 @@ struct umd_vk_pending
 void umd_vk_pending_begin(struct umd_vk_pending *pending);
 void umd_vk_pending_end(struct umd_vk_pending *pending);
 
+struct D3D12DDI_CORELAYER_DEVICECALLBACKS_0022;
+
 struct umd_device
 {
     struct umd_device *next;
     HANDLE hRTDevice;
     PFND3DDDI_ALLOCATECB runtimeAllocateCb;
     PFND3DDDI_ESCAPECB runtimeEscapeCb;
+    // Direct3D 12: allocations go through the core layer, whose kernel-thunk table has no pfnAllocateCb.
+    const struct D3D12DDI_CORELAYER_DEVICECALLBACKS_0022 *coreLayer12;
     // The runtime's callbacks, two of them wrapped; Venus keeps a pointer to callbacks for the instance's life.
     D3DDDI_DEVICECALLBACKS ktCallbacks;
     VkD3DDDICallbacksMESA callbacks;
@@ -74,4 +78,25 @@ struct umd_device
 };
 
 void umd_device_callbacks_init(struct umd_device *dev, HANDLE hRTDevice, const D3DDDI_DEVICECALLBACKS *runtime);
+// The Direct3D 12 table: allocations and deallocations through coreLayer12, in their Direct3D 12 forms.
+void umd_device_callbacks_init12(struct umd_device *dev,
+                                 HANDLE hRTDevice,
+                                 const D3DDDI_DEVICECALLBACKS *runtime,
+                                 const struct D3D12DDI_CORELAYER_DEVICECALLBACKS_0022 *coreLayer);
 void umd_device_callbacks_fini(struct umd_device *dev);
+
+// The ICD's vkGetInstanceProcAddr with this driver's hooks, which vkd3d-proton loads Vulkan through; NULL without
+// the ICD.
+PFN_vkGetInstanceProcAddr umd_vk_loader(void);
+
+// While set on a thread, a vkCreateInstance through umd_vk_loader carries callbacks, which must live as long as the
+// instance.
+void umd_vk_instance_callbacks_begin(VkD3DDDICallbacksMESA *callbacks);
+void umd_vk_instance_callbacks_end(void);
+
+// The ICD's device entry points come from an instance of it: the first one this driver sees.
+void umd_vk_note_instance(VkInstance instance);
+
+// The ICD's own entry points, without this driver's hooks.
+PFN_vkVoidFunction umd_vk_icd_instance_proc(VkInstance instance, const char *name);
+PFN_vkVoidFunction umd_vk_icd_device_proc(VkDevice device, const char *name);

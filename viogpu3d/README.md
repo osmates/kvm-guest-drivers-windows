@@ -10,9 +10,10 @@ display-only driver in `viogpu` stays as it is.
 - Not run in a guest yet.
 - The package carries Mesa's Venus Vulkan driver, cross-built with llvm-mingw: `vulkan_virtio.dll` (ARM64X, for
   ARM64 and x64 processes, named by `VulkanDriverName`) and `vulkan_virtio_x86.dll` (named by
-  `VulkanDriverNameWow`). And the Direct3D 10 and 11 user-mode driver of `umd/`: `viogpu3d_umd.dll` (ARM64X, named by
-  `UserModeDriverName`) and `viogpu3d_umd_x86.dll` (named by `UserModeDriverNameWow`). Compiled, not loaded in
-  Windows yet: `umd/README.md`.
+  `VulkanDriverNameWow`). And the Direct3D 10, 11 and 12 user-mode driver of `umd/`: `viogpu3d_umd.dll` (ARM64X,
+  named by `UserModeDriverName`) and `viogpu3d_umd_x86.dll` (named by `UserModeDriverNameWow`), with vkd3d-proton
+  beside them as `viogpu3d_vkd3d.dll` and `viogpu3d_vkd3d_x86.dll`. Compiled, not loaded in Windows yet:
+  `umd/README.md`.
 
 ## Device
 
@@ -57,6 +58,10 @@ merge request 38731): the same tags and layouts.
 - OSMates' own: `VIOGPU3D_SURFACE`, a surface's record after `VIRTIO_WDDM_CREATE_ALLOCATION` in the allocation's
   private data. The user-mode driver writes it for its shared textures, this driver for its own surfaces, and a
   process that opens an allocation reads what it is from it.
+- OSMates' own: `VIOGPU3D_ALLOCATE_EMPTY_TAG`, an allocation that names no memory: no host resource, a page of
+  aperture, refused for presents, maps and opens, and not CPU visible. The Direct3D 12 driver gives one to heaps
+  and committed resources that have no memory of their own in the kernel, because the Direct3D 12 runtime answers
+  `SetResidencyPriority` itself and refuses an object without an allocation.
 
 ## Surfaces dxgkrnl asks for
 
@@ -79,7 +84,8 @@ merge request 38731): the same tags and layouts.
 
 ## Not done yet
 
-- A run of the Direct3D user-mode driver in Windows, for ARM64, x64 and x86 apps; its D3D12 and D3D9 DDIs.
+- A run of the Direct3D user-mode driver in Windows, for ARM64, x64 and x86 apps, its D3D12 DDI among them; a D3D9
+  DDI (D3D9 apps get D3D9On12 only when they ask for it themselves).
 - A run of the surfaces above and the present's blts in Windows, with another process importing them through Venus.
 - Hardware queues and the GPU's own scheduling.
 - After a power transition the host has lost its contexts and resources; the driver does not report a lost device
@@ -94,8 +100,8 @@ macOS, `Tools/build-macos.sh --d3d-umd viogpu3d/viogpu3d/viogpu3d.vcxproj` build
 and a stamped INF in `viogpu3d/Install/Win11/ARM64`, with the Vulkan drivers of three Mesa builds of the
 `venus-windows` branch of github.com/osmates/mesa, for `aarch64-w64-mingw32`, `arm64ec-w64-mingw32` and
 `i686-w64-mingw32`, configured with `-Dvulkan-icd-dir=bin` (`--venus-icd`, `--venus-icd-arm64ec`, `--venus-icd-x86`),
-and writes the licence notices of the third-party code in them (`umd/README.md`). The catalog is made on Windows with
-Inf2Cat.
+and vkd3d-proton from the `umd/vkd3d-proton` submodule, and writes the licence notices of the third-party code in
+them, with where vkd3d-proton's source is (`umd/README.md`). The catalog is made on Windows with Inf2Cat.
 
 ## Credits
 

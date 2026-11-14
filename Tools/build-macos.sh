@@ -25,7 +25,13 @@ UMD_DLL=viogpu3d_umd.dll
 UMD_DLL_X86=viogpu3d_umd_x86.dll
 ICD_DLL=vulkan_virtio.dll
 ICD_DLL_X86=vulkan_virtio_x86.dll
+VKD3D_DLL=viogpu3d_vkd3d.dll
+VKD3D_DLL_X86=viogpu3d_vkd3d_x86.dll
 UMD_NOTICES=viogpu3d_umd_notices.txt
+# vkd3d-proton v3.1, which the viogpu3d/umd/vkd3d-proton submodule names; the build takes it unmodified only.
+VKD3D_RELEASE=v3.1
+VKD3D_COMMIT=4522cc1a8b1347f1ab1b0f7b14a23ed9444d95d1
+VKD3D_URL=https://github.com/HansKristian-Work/vkd3d-proton
 
 KIT_VERSION="10.0.28000.2526"
 KIT_PACKAGES="microsoft.windows.wdk.arm64 microsoft.windows.sdk.cpp microsoft.windows.sdk.cpp.arm64"
@@ -69,17 +75,21 @@ goes in as ${ICD_DLL_X86}, linked again from its build's link command. Both link
 resource of viogpu3d/umd/vulkan_virtio.rc, so their file version is the DriverVer version of this
 build. Their manifests go in as vulkan_virtio.json and vulkan_virtio_x86.json.
 
-A package whose INF lists ${UMD_DLL} (viogpu3d's) also gets the Direct3D 10 and 11 user-mode
-driver of viogpu3d/umd. --d3d-umd builds it first, into viogpu3d/umd/objfre_<os>_arm64, with
+A package whose INF lists ${UMD_DLL} (viogpu3d's) also gets the Direct3D 10, 11 and 12
+user-mode driver of viogpu3d/umd. --d3d-umd builds it first, into viogpu3d/umd/objfre_<os>_arm64, with
 llvm-mingw: DXVK from the viogpu3d/umd/dxvk submodule with meson and its umd option, Triton and the
 driver's own sources, each for aarch64-w64-mingw32, arm64ec-w64-mingw32 and i686-w64-mingw32. The
-first two make the ARM64X ${UMD_DLL}, the last ${UMD_DLL_X86}. Their file version is the
-DriverVer version of this build. Without --d3d-umd the package takes the files an earlier
---d3d-umd left there, and the package check refuses a DLL whose version differs.
+first two make the ARM64X ${UMD_DLL}, the last ${UMD_DLL_X86}. It also builds vkd3d-proton
+${VKD3D_RELEASE} from the viogpu3d/umd/vkd3d-proton submodule, unmodified, with its own meson for
+ARM64X and for i686, and links its d3d12core.dll objects again with viogpu3d/umd/vkd3d's export list
+and version resource: ${VKD3D_DLL} and ${VKD3D_DLL_X86}, which the Direct3D 12 driver loads.
+Their file version is the DriverVer version of this build. Without --d3d-umd the package takes the
+files an earlier --d3d-umd left there, and the package check refuses a DLL whose version differs.
 
 ${UMD_NOTICES}, written into the package, carries the licences of the third-party code in
 these drivers: Triton and DXVK with the DXVK subprojects linked in, from this tree and the DXVK copy of
---d3d-umd, Mesa's, from the licence statement and copyright lines of every Mesa source and header
+--d3d-umd, vkd3d-proton's LGPL-2.1 with where its source is, and the dxil-spirv and dxbc-spirv
+it links, Mesa's, from the licence statement and copyright lines of every Mesa source and header
 the three Venus builds compiled (ninja's dependency records), with the licence texts of the Mesa
 tree's licenses folder, and the toolchain's: every DLL links llvm-mingw's runtime statically, so
 the licences llvm-mingw ships for mingw-w64's runtime and for LLVM's libc++, libunwind and
@@ -92,8 +102,8 @@ machine trusts. No keychain is used.
 
 Needs clang, lld-link, llvm-lib and llvm-rc from one LLVM (tested with 22.1 and 23.1),
 xmllint, curl, unzip and openssl, and osslsigncode for --test-sign. --d3d-umd also needs the
-llvm-mingw of fetch, meson, rsync and glslang (or glslangValidator) on PATH, and the DXVK
-submodule checked out with its own submodules. Packing viogpu3d needs ninja, python3 and the
+llvm-mingw of fetch, meson, rsync and glslang (or glslangValidator) on PATH, and the DXVK and
+vkd3d-proton submodules checked out with their own submodules. Packing viogpu3d needs ninja, python3 and the
 llvm-mingw of fetch. WDK_DIR
 and this clone must be on a case-insensitive volume (the macOS default): the kit's headers include
 each other in mixed case.
@@ -589,9 +599,10 @@ pack_venus_icd() {
 }
 
 UMD_TRITON_SOURCES=(tritonDDI.c tritonDxbc.c tritonDxgi.c tritonHostCaps.c tritonPresent.c tritonQuery.c
-    tritonResource.c tritonShader.c tritonState.c tritonView.c)
-UMD_SOURCES=(umd_adapter_info.c umd_backend.c umd_blob_map.c umd_format.c umd_main.c umd_path.c umd_pipeline.c
-    umd_resource_record.c umd_shared.c umd_vk.c umd_vk_chain.c)
+    tritonResource.c tritonShader.c tritonState.c tritonView.c tritonDDI12.c tritonDescriptor12.c tritonDxil.c
+    tritonList12.c tritonPipeline12.c tritonPresent12.c tritonQueue12.c tritonResource12.c)
+UMD_SOURCES=(umd_adapter_info.c umd_backend.c umd_backend12.c umd_blob_map.c umd_d3d12.c umd_format.c umd_main.c
+    umd_path.c umd_pipeline.c umd_resource_record.c umd_shared.c umd_vk.c umd_vk_chain.c umd_vkd3d.c)
 # What DXVK's meson makes with -Dumd=true, all linked into the driver.
 UMD_DXVK_LIBS=(src/d3d11/libd3d11_umd.a src/dxgi/libdxgi_umd.a src/dxvk/libdxvk.a src/spirv/libspirv.a
     src/util/libutil.a src/vulkan/libvkcommon.a src/wsi/libwsi.a subprojects/dxbc-spirv/libdxbc_spv.a
@@ -611,7 +622,8 @@ umd_ddi_headers() {
     for h in "${SDK_SHARED_INC}/d3dkmthk.h" "${SDK_SHARED_INC}/d3dukmdt.h" "${SDK_SHARED_INC}/d3dkmdt.h" \
         "${WDK_SHARED_INC}/d3dkmddi.h" "${WDK_UM_INC}/d3d10umddi.h" "${WDK_UM_INC}/d3dumddi.h" \
         "${UM_INC}/dxgiddi.h" "${UM_INC}/dxmini.h" "${WDK_UM_INC}/d3d10TokenizedProgramFormat.hpp" \
-        "${WDK_UM_INC}/d3d11TokenizedProgramFormat.hpp" "${WDK_UM_INC}/d3d12TokenizedProgramFormat.hpp"; do
+        "${WDK_UM_INC}/d3d11TokenizedProgramFormat.hpp" "${WDK_UM_INC}/d3d12TokenizedProgramFormat.hpp" \
+        "${WDK_UM_INC}/d3d12umddi.h"; do
         [[ -f "${h}" ]] || die "no ${h} in ${WDK_DIR}; run Tools/build-macos.sh fetch"
         ln -s "${h}" "${dir}/"
     done
@@ -693,6 +705,10 @@ umd_compile() {
         "${cc}" "${cflags[@]}" -Wextra -Werror "-I${UMD_DIR}/src" "-I${out}/dxvk-src/src/d3d11" \
             "-I${out}/dxvk-src/include/vulkan/include" -c "${UMD_DIR}/src/${src}" -o "${dir}/obj/${src%.c}.o"
     done
+    # The runtime's callbacks, not D3DKMT.
+    undefined=$(for src in "${UMD_SOURCES[@]}"; do printf '%s\n' "${dir}/obj/${src%.c}.o"; done |
+        xargs "$2/llvm-nm" -u "${dir}/libtriton.a" | grep -E '(^|[^A-Za-z0-9_])D3DKMT' || true)
+    [[ -z "${undefined}" ]] || die "the driver's own code or Triton calls D3DKMT: ${undefined}"
 }
 
 # umd_inputs <out> <arch>...: the driver's objects, Triton and DXVK for those targets, in link order.
@@ -712,6 +728,136 @@ umd_inputs() {
             printf '%s\n' "${out}/${arch}/dxvk-build/${lib}"
         done
     done
+}
+
+# vkd3d-proton as the submodule has it: the pinned release, its submodules at the commits it records, nothing changed.
+umd_vkd3d_source() {
+    local sub="${UMD_DIR}/vkd3d-proton" head changes
+    [[ -f "${sub}/meson.build" && -f "${sub}/subprojects/dxil-spirv/meson.build" &&
+        -f "${sub}/subprojects/dxil-spirv/subprojects/dxbc-spirv/meson.build" &&
+        -f "${sub}/subprojects/dxil-spirv/third_party/spirv-headers/include/spirv/unified1/spirv.h" &&
+        -f "${sub}/khronos/Vulkan-Headers/include/vulkan/vulkan_core.h" ]] ||
+        die "no vkd3d-proton with its submodules in ${sub}; run git submodule update --init viogpu3d/umd/vkd3d-proton," \
+            "then git submodule update --init in it, and git submodule update --init third_party/spirv-headers" \
+            "subprojects/dxbc-spirv in its subprojects/dxil-spirv"
+    head=$(git -C "${sub}" rev-parse HEAD) || die "${sub} is not a git checkout"
+    [[ "${head}" == "${VKD3D_COMMIT}" ]] ||
+        die "${sub} is at ${head}, not vkd3d-proton ${VKD3D_RELEASE} (${VKD3D_COMMIT})"
+    changes=$(git -C "${sub}" status --porcelain --untracked-files=no --ignore-submodules=none) ||
+        die "git status of ${sub} failed"
+    [[ -z "${changes}" ]] || die "vkd3d-proton in ${sub} has changes; the driver takes it unmodified only: ${changes}"
+}
+
+# umd_vkd3d_build <out> <llvm-mingw bin> <arm64x|i686>: vkd3d-proton's own meson build of d3d12core.dll for one
+# target, in <out>/vkd3d/<target>/build. ARM64X compiles and links each file for both views, as vkd3d-proton's own
+# build-arm64x.txt does.
+umd_vkd3d_build() {
+    local dir="$1/vkd3d/$3" mingw=$2 target=$3 triple family=aarch64 cpu=aarch64 cross glslang hybrid=""
+    cross="${dir}/cross.txt"
+    glslang=$(command -v glslang || command -v glslangValidator || true)
+    [[ -n "${glslang}" ]] || die "--d3d-umd needs glslang for vkd3d-proton's shaders (brew install glslang)"
+    case "${target}" in
+        arm64x)
+            triple=arm64ec-w64-mingw32
+            hybrid="[built-in options]
+c_args = ['-marm64x']
+cpp_args = ['-marm64x']
+c_link_args = ['-marm64x']
+cpp_link_args = ['-marm64x']
+
+"
+            ;;
+        i686)
+            triple=i686-w64-mingw32
+            family=x86
+            cpu=i686
+            ;;
+        *) die "no vkd3d-proton target ${target}" ;;
+    esac
+    [[ -x "${mingw}/${triple}-widl" ]] || die "no ${triple}-widl in ${mingw}; vkd3d-proton needs it for its headers"
+    mkdir -p "${dir}"
+    cat >"${cross}.new" <<EOF
+[binaries]
+c = '${mingw}/${triple}-clang'
+cpp = '${mingw}/${triple}-clang++'
+ar = '${mingw}/${triple}-llvm-ar'
+strip = '${mingw}/${triple}-strip'
+widl = '${mingw}/${triple}-widl'
+pkg-config = '/usr/bin/false'
+glslang = '${glslang}'
+
+[properties]
+needs_exe_wrapper = true
+
+${hybrid}[host_machine]
+system = 'windows'
+cpu_family = '${family}'
+cpu = '${cpu}'
+endian = 'little'
+EOF
+    if cmp -s "${cross}.new" "${cross}"; then
+        rm "${cross}.new"
+    else
+        rm -rf "${dir}/build"
+        mv "${cross}.new" "${cross}"
+    fi
+    if [[ ! -f "${dir}/build/build.ninja" ]]; then
+        meson setup "${dir}/build" "${UMD_DIR}/vkd3d-proton" --cross-file "${cross}" --buildtype=release \
+            -Db_ndebug=true -Denable_tests=false -Denable_extras=false >"${dir}/setup.log" ||
+            die "vkd3d-proton's meson setup for ${target} failed; see ${dir}/setup.log"
+    fi
+    ninja -C "${dir}/build" libs/d3d12core/d3d12core.dll || die "vkd3d-proton did not build for ${target}"
+}
+
+# umd_vkd3d_abi_check <out> <llvm-mingw bin> <arm64x|i686>: the driver's copy of vkd3d-proton's API against the headers
+# of the build it links, and ID3D12DeviceExt1's uuid against vkd3d-proton's IDL.
+umd_vkd3d_abi_check() {
+    local build="$1/vkd3d/$3/build" cc="$2/aarch64-w64-mingw32-clang" generated
+    local idl="${UMD_DIR}/vkd3d-proton/include/vkd3d_device_vkd3d_ext.idl"
+    [[ "$3" != i686 ]] || cc="$2/i686-w64-mingw32-clang"
+    # widl writes the headers of vkd3d-proton's IDL into the private folder of the target that first needs them.
+    generated=$(find "${build}/libs" -name vkd3d_device_vkd3d_ext.h -print | head -1)
+    [[ -n "${generated}" ]] || die "vkd3d-proton's build of $3 has no vkd3d_device_vkd3d_ext.h"
+    "${cc}" -std=gnu11 -fsyntax-only -Wall -Werror -D_WIN32_WINNT=0x0A00 "-I${UMD_DIR}/vkd3d-proton/include" \
+        "-I$(dirname "${generated}")" "-I${UMD_DIR}/vkd3d-proton/khronos/Vulkan-Headers/include" "-I${UMD_DIR}/src" \
+        "${UMD_DIR}/vkd3d/vkd3d_abi_check.c" || die "viogpu3d/umd/src/umd_vkd3d_api.h no longer matches vkd3d-proton"
+    tr -d '\r' <"${idl}" | grep -A 5 -F 'uuid(099a73fd-2199-4f45-bf48-0eb86f6fdb65)' |
+        grep -q -x 'interface ID3D12DeviceExt1 : ID3D12DeviceExt' ||
+        die "ID3D12DeviceExt1 has another uuid in ${idl}"
+}
+
+# umd_vkd3d_link <out> <arm64x|i686> <resource object> <dll>: vkd3d-proton's own link of d3d12core.dll again, with
+# viogpu3d/umd/vkd3d's export list and the version resource.
+umd_vkd3d_link() {
+    python3 -I - "$(command -v ninja)" "$1/vkd3d/$2/build" "${UMD_DIR}/vkd3d/viogpu3d_vkd3d.def" "$3" "$4" <<'EOF'
+import shlex
+import subprocess
+import sys
+
+ninja, build, def_file, res, out = sys.argv[1:6]
+target = "libs/d3d12core/d3d12core.dll"
+line = subprocess.run([ninja, "-C", build, "-t", "commands", target], check=True, capture_output=True,
+                      text=True).stdout.splitlines()[-1]
+cmd = []
+defs = 0
+args = iter(shlex.split(line))
+for arg in args:
+    if arg == "-o":
+        next(args)
+        cmd += ["-o", out]
+    elif arg.startswith("-Wl,--out-implib="):
+        continue
+    elif arg.endswith("d3d12core.def"):
+        # Meson passes it as an input and again as the module definition: once is enough.
+        if defs == 0:
+            cmd.append(def_file)
+        defs += 1
+    else:
+        cmd.append(arg)
+if defs == 0:
+    sys.exit(f"build-macos: {target}'s link names no d3d12core.def")
+subprocess.run(cmd + [res], cwd=build, check=True)
+EOF
 }
 
 # version_resource <rc file in viogpu3d/umd> <machine> <VER_ARCH> <object> [rc define]: a DLL's version resource, with
@@ -751,6 +897,13 @@ build_d3d_umd() {
         umd_compile "${out}" "${mingw}" "${arch}"
     done
 
+    umd_vkd3d_source
+    for target in arm64x i686; do
+        note "vkd3d-proton ${VKD3D_RELEASE} for ${target}"
+        umd_vkd3d_build "${out}" "${mingw}" "${target}"
+        umd_vkd3d_abi_check "${out}" "${mingw}" "${target}"
+    done
+
     rm -f "${out}/triton_null.dll" "${out}/triton_null_x86.dll"
     "${mingw}/arm64ec-w64-mingw32-clang" -marm64x -shared -o "${out}/triton_null.dll" \
         "${UMD_DIR}/triton/triton_null.def" "${out}/aarch64/obj/triton_backend_null.o" \
@@ -763,6 +916,13 @@ build_d3d_umd() {
     copyright_years "$(prop "${REPO}/viogpu3d/viogpu3d/viogpu3d.props" CopyrightStrings)"
     version_resource viogpu3d_umd.rc arm64 ARM64 "${out}/aarch64/obj/viogpu3d_umd.res.o"
     version_resource viogpu3d_umd.rc x86 x86 "${out}/i686/obj/viogpu3d_umd.res.o" VIOGPU3D_UMD_X86
+    version_resource vkd3d/viogpu3d_vkd3d.rc arm64 ARM64 "${out}/vkd3d/arm64x/viogpu3d_vkd3d.res.o"
+    version_resource vkd3d/viogpu3d_vkd3d.rc x86 x86 "${out}/vkd3d/i686/viogpu3d_vkd3d.res.o" VIOGPU3D_VKD3D_X86
+    rm -f "${out}/${VKD3D_DLL}" "${out}/${VKD3D_DLL_X86}"
+    umd_vkd3d_link "${out}" arm64x "${out}/vkd3d/arm64x/viogpu3d_vkd3d.res.o" "${out}/${VKD3D_DLL}" ||
+        die "the link of ${VKD3D_DLL} failed"
+    umd_vkd3d_link "${out}" i686 "${out}/vkd3d/i686/viogpu3d_vkd3d.res.o" "${out}/${VKD3D_DLL_X86}" ||
+        die "the link of ${VKD3D_DLL_X86} failed"
 
     while IFS= read -r line; do
         inputs+=("${line}")
@@ -777,13 +937,14 @@ build_d3d_umd() {
     "${mingw}/i686-w64-mingw32-clang++" -shared -g -o "${out}/${UMD_DLL_X86}" "${UMD_DIR}/viogpu3d_umd.def" \
         "${out}/i686/obj/viogpu3d_umd.res.o" "${inputs_x86[@]}" -static -ldxguid -lversion \
         "-Wl,--pdb=${out}/viogpu3d_umd_x86.pdb"
-    note "built ${out#"${REPO}"/}/${UMD_DLL} (ARM64X) and ${UMD_DLL_X86}, version ${STAMPINF_VERSION}"
+    note "built ${out#"${REPO}"/}/${UMD_DLL} and ${VKD3D_DLL} (ARM64X), ${UMD_DLL_X86} and ${VKD3D_DLL_X86}," \
+        "version ${STAMPINF_VERSION}"
 }
 
 pack_d3d_umd() {
     local pack=$1 out dll
     out=$(umd_out)
-    for dll in "${UMD_DLL}" "${UMD_DLL_X86}"; do
+    for dll in "${UMD_DLL}" "${UMD_DLL_X86}" "${VKD3D_DLL}" "${VKD3D_DLL_X86}"; do
         [[ -f "${out}/${dll}" ]] ||
             die "${PROJ}: its INF ships the Direct3D drivers, and ${out#"${REPO}"/} has no ${dll}; pass --d3d-umd"
         cp "${out}/${dll}" "${pack}/"
@@ -936,6 +1097,98 @@ for rel, text in sorted(texts.items()):
 EOF
 }
 
+# vkd3d_notices <vkd3d-proton build>...: vkd3d-proton's licence, where its source is, and the licences of the code it
+# links that states another: every file of the vkd3d-proton tree (its submodules included) that ninja's dependency
+# records list for an object of d3d12core.dll.
+vkd3d_notices() {
+    local sub="${UMD_DIR}/vkd3d-proton" modules
+    modules=$(git -C "${sub}" submodule status --recursive | awk '$1 !~ /^-/ { print $2 " " substr($1, 1, 12) }') ||
+        die "git submodule status of ${sub} failed"
+    python3 -I - "$(command -v ninja)" "${sub}" "${VKD3D_RELEASE}" "${VKD3D_COMMIT}" "${VKD3D_URL}" "${modules}" \
+        "${VKD3D_DLL}, ${VKD3D_DLL_X86}" "$@" <<'EOF'
+import os
+import re
+import subprocess
+import sys
+
+ninja, src, release, commit, url, modules, dlls = sys.argv[1:8]
+builds = sys.argv[8:]
+src = os.path.realpath(src)
+target = os.path.join("libs", "d3d12core", "d3d12core.dll")
+files = set()
+for build in builds:
+    root = os.path.realpath(build)
+    inputs = subprocess.run([ninja, "-C", build, "-t", "inputs", target], check=True, capture_output=True,
+                            text=True).stdout.split()
+    objects = [i for i in inputs if i.endswith((".obj", ".o"))]
+    deps = subprocess.run([ninja, "-C", build, "-t", "deps", *objects], check=True, capture_output=True,
+                          text=True).stdout
+    for line in deps.splitlines():
+        if line.startswith(" ") and line.strip():
+            path = os.path.realpath(os.path.join(root, line.strip()))
+            if path.startswith(src + os.sep):
+                files.add(os.path.relpath(path, src))
+
+# Parts of the tree under a licence file of their own; the rest is vkd3d-proton's.
+PARTS = [
+    (os.path.join("subprojects", "dxil-spirv", "subprojects", "dxbc-spirv"), "dxbc-spirv", "LICENSE"),
+    (os.path.join("subprojects", "dxil-spirv", "third_party", "spirv-headers"), "SPIRV-Headers", "LICENSE"),
+    (os.path.join("subprojects", "dxil-spirv"), "dxil-spirv", "LICENSE.MIT"),
+    (os.path.join("khronos", "SPIRV-Headers"), "SPIRV-Headers", "LICENSE"),
+    (os.path.join("khronos", "Vulkan-Headers"), "Vulkan-Headers", "LICENSE.md"),
+]
+OTHER = re.compile(r"Permission is hereby granted|Redistribution and use in source and binary forms|"
+                   r"SPDX-License-Identifier:\s*(?!LGPL)|Licensed under|public domain", re.I)
+COMMENT = re.compile(r"^\s*(?:/\*+|\*+/|\*+|//+|\|\*|#+)?\s?")
+used = {}
+stated = {}
+for rel in sorted(files):
+    part = next((part for part in PARTS if rel.startswith(part[0] + os.sep)), None)
+    head = open(os.path.join(src, rel), encoding="utf-8", errors="replace").read(16384)
+    block = re.match(r"\s*(/\*.*?\*/|(?://[^\n]*\n)+)", head, re.S)
+    used.setdefault(part, []).append(rel)
+    # A file's own statement goes in as it is: it may name other holders than its part's licence file.
+    if block and OTHER.search(block.group(1)):
+        text = "\n".join(COMMENT.sub("", l).rstrip(" *|\\") for l in block.group(1).splitlines()).strip()
+        stated.setdefault(text, []).append(rel)
+
+
+def read(rel):
+    return open(os.path.join(src, rel), encoding="utf-8").read().strip()
+
+
+print(f"== vkd3d-proton {release}, {url}, unmodified: {dlls} ==")
+print()
+print(f"{dlls} are vkd3d-proton {release} (commit {commit}), with the submodules it records:")
+for module in modules.splitlines():
+    print(f"  {module}")
+print("Nothing in it is changed. Each DLL is vkd3d-proton's own link of its d3d12core.dll, from its own meson build,")
+print("with another export list (the API of its include/vkd3d.h) and a version resource:")
+print("viogpu3d/umd/vkd3d/viogpu3d_vkd3d.def and viogpu3d_vkd3d.rc, linked by Tools/build-macos.sh, in")
+print("https://github.com/osmates/kvm-guest-drivers-windows, the source of the drivers in this package.")
+print()
+print("Source: the complete source of these DLLs is that vkd3d-proton tree, at the URL and commit above, with the")
+print("export list and build script named above, offered from the same place as this package. You may build")
+print("vkd3d-proton yourself, changed or not, link it the same way, and put the result in place of these DLLs:")
+print("the Direct3D 12 driver loads them by name from its own folder and calls only the functions of")
+print("include/vkd3d.h and the ID3D12DeviceExt1 interface of include/vkd3d_device_vkd3d_ext.idl.")
+print()
+print(read("COPYING"))
+print("\n-- GNU Lesser General Public License, version 2.1 (LICENSE) --\n")
+print(read("LICENSE"))
+for part, rels in sorted(used.items(), key=lambda u: u[0][1] if u[0] else ""):
+    if part is None:
+        continue
+    path, name, licence = part
+    print(f"\n-- {name} ({path}/{licence}), {len(rels)} file{'s' if len(rels) != 1 else ''} --\n")
+    print(read(os.path.join(path, licence)))
+for text, rels in sorted(stated.items(), key=lambda t: t[1][0]):
+    where = rels[0] if len(rels) == 1 else f"{len(rels)} files, the first {rels[0]}"
+    print(f"\n-- The licence stated in {where} --\n")
+    print(text)
+EOF
+}
+
 # The llvm-mingw a Venus build linked its ICD with.
 icd_toolchain() {
     local build target compiler
@@ -952,7 +1205,7 @@ icd_toolchain() {
 toolchain_notices() {
     local root file known seen=()
     printf '\n== The llvm-mingw runtime, https://github.com/mstorsjo/llvm-mingw: %s ==\n\n' \
-        "${UMD_DLL}, ${UMD_DLL_X86}, ${ICD_DLL}, ${ICD_DLL_X86}"
+        "${UMD_DLL}, ${UMD_DLL_X86}, ${VKD3D_DLL}, ${VKD3D_DLL_X86}, ${ICD_DLL}, ${ICD_DLL_X86}"
     echo "Each DLL links parts of its toolchain's runtime statically: mingw-w64's startup code, libmingw32 and"
     echo "libmingwex (gdtoa among it), and LLVM's libc++, libc++abi, libunwind and compiler-rt builtins. Their"
     echo "licences, as llvm-mingw ships them:"
@@ -984,8 +1237,8 @@ write_notices() {
         toolchains+=("${root}")
     done
     {
-        echo "${UMD_DLL}, ${UMD_DLL_X86}, ${ICD_DLL} and ${ICD_DLL_X86} contain the code below, each part under"
-        echo "its own licence."
+        echo "${UMD_DLL}, ${UMD_DLL_X86}, ${VKD3D_DLL}, ${VKD3D_DLL_X86}, ${ICD_DLL} and ${ICD_DLL_X86}"
+        echo "contain the code below, each part under its own licence."
         printf '\n== Triton, src/virtio/neptune/triton of https://github.com/osy/virtio-win-mesa, changed: %s ==\n\n' \
             "${UMD_DLL}, ${UMD_DLL_X86}"
         cat "${UMD_DIR}/triton/LICENSE"
@@ -999,6 +1252,8 @@ write_notices() {
                 "${UMD_DLL}, ${UMD_DLL_X86}"
             cat "${licence}"
         done
+        echo
+        vkd3d_notices "${out}/vkd3d/arm64x/build" "${out}/vkd3d/i686/build" || die "the vkd3d-proton notices failed"
         toolchain_notices "${toolchains[@]}"
         echo
         mesa_notices "$(mesa_build_of "${VENUS_ICD_DIR}")" "$(mesa_build_of "${VENUS_ICD_ARM64EC_DIR}")" \

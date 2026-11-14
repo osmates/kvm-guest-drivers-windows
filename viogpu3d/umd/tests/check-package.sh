@@ -1,23 +1,29 @@
 #!/bin/sh
-# Checks a built viogpu3d package for what Windows needs of its Direct3D user-mode drivers and Venus Vulkan drivers.
+# Checks a built viogpu3d package for what Windows needs of its Direct3D user-mode drivers, the vkd3d-proton DLLs
+# they load, and the Venus Vulkan drivers.
 #
 #   MESA_SRC=<Mesa tree> MINGW_DIR=<llvm-mingw> sh viogpu3d/umd/tests/check-package.sh <package folder>
 #
 # The folder is Install/<OS>/ARM64 as Tools/build-macos.sh packs it, with the stamped viogpu3d.inf. Checks:
 # - the INF lists every file of the package and the package has every file the INF lists;
-# - the INF copies the Direct3D and Vulkan drivers, their manifests and the notices into the driver store (DIRID 13);
+# - the INF copies the Direct3D, vkd3d-proton and Vulkan drivers, their manifests and the notices into the driver
+#   store (DIRID 13);
 # - UserModeDriverName names the ARM64X driver and UserModeDriverNameWow the x86 driver there, by full path (%13%),
 #   each in its four slots; VulkanDriverName and VulkanDriverNameWow name the two manifests there, whose library_path
 #   is the DLL beside them;
-# - viogpu3d_umd.dll and vulkan_virtio.dll are ARM64X, with a native and an ARM64EC view; viogpu3d_umd_x86.dll and
-#   vulkan_virtio_x86.dll are x86;
-# - each view of each Direct3D driver exports OpenAdapter10_2 only, by that name (undecorated on x86, where the
-#   function is stdcall), and each view of each Vulkan driver the loader's three vk_icd entry points;
-# - every view imports system DLLs only, and no view of a Direct3D driver imports a D3DKMT function;
-# - the file version of all four DLLs is the INF's DriverVer version;
-# - the notices file carries the full licence of Triton, of DXVK and of each of DXVK's subprojects, as this tree has
-#   them, the licences llvm-mingw ships for its runtime, as MINGW_DIR has them, and a Mesa part naming MIT, with
-#   copyright lines, whose every licence text is the one in MESA_SRC/licenses.
+# - viogpu3d_umd.dll, viogpu3d_vkd3d.dll and vulkan_virtio.dll are ARM64X, with a native and an ARM64EC view;
+#   viogpu3d_umd_x86.dll, viogpu3d_vkd3d_x86.dll and vulkan_virtio_x86.dll are x86;
+# - each view of each Direct3D driver exports OpenAdapter10_2 and OpenAdapter12 only, by those names (undecorated on
+#   x86, where the functions are stdcall), each view of each vkd3d-proton DLL the vkd3d.h API of
+#   viogpu3d/umd/vkd3d/viogpu3d_vkd3d.def, and each view of each Vulkan driver the loader's three vk_icd entry points;
+# - every view imports system DLLs only, and vkd3d-proton's dxgi.dll too; no view of a Direct3D driver imports a
+#   D3DKMT function (the vkd3d-proton DLLs import their own);
+# - the file version of all six DLLs is the INF's DriverVer version;
+# - the notices file carries the full licence of Triton, of DXVK and of each of DXVK's subprojects, of vkd3d-proton
+#   (LGPL-2.1, with its copyright statement, the commit this tree's submodule is at, and where its source is), of
+#   dxil-spirv and of dxbc-spirv, as this tree has them, the licences llvm-mingw ships for its runtime, as MINGW_DIR
+#   has them, and a Mesa part naming MIT, with copyright lines, whose every licence text is the one in
+#   MESA_SRC/licenses.
 #
 # Needs llvm-objdump and llvm-readobj (LLVM_OBJDUMP and LLVM_READOBJ, else in LLVM_BIN, else on PATH, else
 # Homebrew's llvm), python3, MESA_SRC: the Mesa tree the Venus drivers were built from, and MINGW_DIR: the llvm-mingw
@@ -31,6 +37,8 @@ UMD=viogpu3d_umd.dll
 UMD_X86=viogpu3d_umd_x86.dll
 ICD=vulkan_virtio.dll
 ICD_X86=vulkan_virtio_x86.dll
+VKD3D=viogpu3d_vkd3d.dll
+VKD3D_X86=viogpu3d_vkd3d_x86.dll
 NOTICES=viogpu3d_umd_notices.txt
 UMD_SRC=$(cd "$(dirname "$0")/.." && pwd)
 
@@ -89,7 +97,7 @@ for path in "$PACK"/*; do
 done
 [ -z "$unlisted" ] && pass "the INF lists every file of the package" || fail "files the INF does not list:$unlisted"
 
-for file in $UMD $UMD_X86 $ICD $ICD_X86 $NOTICES vulkan_virtio.json vulkan_virtio_x86.json; do
+for file in $UMD $UMD_X86 $VKD3D $VKD3D_X86 $ICD $ICD_X86 $NOTICES vulkan_virtio.json vulkan_virtio_x86.json; do
     echo "$inf_files" | grep -q -x -F "$file" || fail "the INF does not list $file"
 done
 
@@ -174,7 +182,9 @@ elif [ -z "${MINGW_DIR:-}" ] || [ ! -f "$MINGW_DIR/LICENSE.TXT" ]; then
 else
     # Whitespace aside, each licence file's text must be in the notices.
     lacking=$(python3 -I - "$PACK/$NOTICES" "$MESA_SRC" "$UMD_SRC/triton/LICENSE" "$UMD_SRC/dxvk/LICENSE" \
-        "$UMD_SRC"/dxvk/subprojects/*/LICENSE "$MINGW_DIR/LICENSE.TXT" \
+        "$UMD_SRC"/dxvk/subprojects/*/LICENSE "$UMD_SRC/vkd3d-proton/LICENSE" "$UMD_SRC/vkd3d-proton/COPYING" \
+        "$UMD_SRC/vkd3d-proton/subprojects/dxil-spirv/LICENSE.MIT" \
+        "$UMD_SRC/vkd3d-proton/subprojects/dxil-spirv/subprojects/dxbc-spirv/LICENSE" "$MINGW_DIR/LICENSE.TXT" \
         "$MINGW_DIR"/aarch64-w64-mingw32/share/mingw32/COPYING.MinGW-w64-runtime.txt \
         "$MINGW_DIR"/i686-w64-mingw32/share/mingw32/COPYING.MinGW-w64-runtime.txt <<'EOF'
 import os
@@ -215,13 +225,21 @@ for name, path in headings:
 EOF
     ) || lacking="(python3 failed)"
     if [ -z "$lacking" ]; then
-        pass "$NOTICES has the licences of Triton, DXVK, DXVK's subprojects, the llvm-mingw runtime and Mesa"
+        pass "$NOTICES has the licences of Triton, DXVK, DXVK's subprojects, vkd3d-proton, dxil-spirv," \
+            "dxbc-spirv, the llvm-mingw runtime and Mesa"
     else
         fail "$NOTICES lacks: $(echo "$lacking" | tr '\n' ' ')"
     fi
-    for dll in $UMD $UMD_X86 $ICD $ICD_X86; do
+    for dll in $UMD $UMD_X86 $VKD3D $VKD3D_X86 $ICD $ICD_X86; do
         head -n 2 "$PACK/$NOTICES" | tr '\n' ' ' | grep -q -F "$dll" || fail "$NOTICES does not name $dll"
     done
+    commit=$(git -C "$UMD_SRC/vkd3d-proton" rev-parse HEAD 2>/dev/null || true)
+    if [ -n "$commit" ] && grep -q -F "(commit $commit)" "$PACK/$NOTICES" &&
+        grep -q -F "Source: the complete source of these DLLs" "$PACK/$NOTICES"; then
+        pass "$NOTICES says which vkd3d-proton ($commit) the DLLs are and where its source is"
+    else
+        fail "$NOTICES does not name vkd3d-proton's commit '$commit' and where its source is"
+    fi
 fi
 
 # Per view: "<view> format <f>", "<view> export <name>", "<view> import <dll>", "<view> symbol <imported function>";
@@ -250,10 +268,20 @@ for line in sys.stdin:
 '
 }
 
-# check_dll <file> <arm64x|i386> <export>...: machine, exports and imports of every view.
+# The lines that are not one of the DLLs the regex $1 names; all of them when it is empty.
+without() {
+    if [ -n "$1" ]; then
+        grep -v -i -E "^($1)\.dll\$" || true
+    else
+        cat
+    fi
+}
+
+# check_dll <file> <arm64x|i386> <also> <export>...: machine, exports and imports of every view. <also> is a regex of
+# DLLs it may import beyond the system's, or empty.
 check_dll() {
-    dll=$1 machine=$2
-    shift 2
+    dll=$1 machine=$2 also=$3
+    shift 3
     if [ ! -f "$PACK/$dll" ]; then
         fail "no $dll in the package"
         return
@@ -279,8 +307,8 @@ check_dll() {
         imports=$(echo "$out" | awk -v v="$view" '$1 == v && $2 == "import" { print $3 }')
         # System DLLs only. The runtime's own D3D and DXGI DLLs, the Vulkan loader and toolchain runtimes are refused by
         # name.
-        banned=$(echo "$imports" | grep -i -E '^(vulkan-1|d3d9|d3d10|d3d10_1|d3d10core|d3d11|d3d12|dxgi|libc\+\+|libunwind|libwinpthread-1|libgcc_s_seh-1|libgcc_s_dw2-1|libstdc\+\+-6)\.dll$' || true)
-        other=$(echo "$imports" | grep -v -i -E '^(kernel32|user32|gdi32|advapi32|version|ole32|oleaut32|shell32|shlwapi|ntdll)\.dll$|^api-ms-win-[a-z0-9-]+\.dll$' || true)
+        banned=$(echo "$imports" | grep -i -E '^(vulkan-1|d3d9|d3d10|d3d10_1|d3d10core|d3d11|d3d12|dxgi|libc\+\+|libunwind|libwinpthread-1|libgcc_s_seh-1|libgcc_s_dw2-1|libstdc\+\+-6)\.dll$' | without "$also" || true)
+        other=$(echo "$imports" | grep -v -i -E '^(kernel32|user32|gdi32|advapi32|version|ole32|oleaut32|shell32|shlwapi|ntdll)\.dll$|^api-ms-win-[a-z0-9-]+\.dll$' | without "$also" || true)
         if [ -n "$imports" ] && [ -z "$banned" ] && [ -z "$other" ]; then
             pass "$dll ($view) imports system DLLs only: $(echo $imports)"
         else
@@ -289,10 +317,14 @@ check_dll() {
     done
 }
 
-check_dll $UMD arm64x OpenAdapter10_2
-check_dll $UMD_X86 i386 OpenAdapter10_2
-check_dll $ICD arm64x vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr vk_icdNegotiateLoaderICDInterfaceVersion
-check_dll $ICD_X86 i386 vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr vk_icdNegotiateLoaderICDInterfaceVersion
+check_dll $UMD arm64x "" OpenAdapter10_2 OpenAdapter12
+check_dll $UMD_X86 i386 "" OpenAdapter10_2 OpenAdapter12
+# vkd3d-proton's d3d12core.dll objects call CreateDXGIFactory1 on a path the driver never takes; the DLL is theirs.
+vkd3d_exports=$(tr -d '\r' <"$UMD_SRC/vkd3d/viogpu3d_vkd3d.def" | awk 'NR > 1 && NF { print $1 }')
+check_dll $VKD3D arm64x dxgi $vkd3d_exports
+check_dll $VKD3D_X86 i386 dxgi $vkd3d_exports
+check_dll $ICD arm64x "" vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr vk_icdNegotiateLoaderICDInterfaceVersion
+check_dll $ICD_X86 i386 "" vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr vk_icdNegotiateLoaderICDInterfaceVersion
 
 # DXVK's GDI interop, keyed mutexes and NT handle sharing are built out of the Direct3D drivers.
 for dll in $UMD $UMD_X86; do
@@ -302,7 +334,7 @@ for dll in $UMD $UMD_X86; do
 done
 
 driverver=$(printf '%s\n' "$inf" | awk -F'[=,]' 'tolower($1) ~ /^[ \t]*driverver[ \t]*$/ { v = $3; gsub(/[ \t]/, "", v); print v; exit }')
-for dll in $UMD $UMD_X86 $ICD $ICD_X86; do
+for dll in $UMD $UMD_X86 $VKD3D $VKD3D_X86 $ICD $ICD_X86; do
     [ -f "$PACK/$dll" ] || continue
     fileversion=$(python3 -I - "$PACK/$dll" <<'EOF'
 import struct

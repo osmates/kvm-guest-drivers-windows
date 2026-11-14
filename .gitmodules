@@ -2,3 +2,6 @@
 	path = viogpu3d/umd/dxvk
 	url = https://github.com/osmates/dxvk.git
 	branch = osmates
+[submodule "viogpu3d/umd/vkd3d-proton"]
+	path = viogpu3d/umd/vkd3d-proton
+	url = https://github.com/HansKristian-Work/vkd3d-proton.git
