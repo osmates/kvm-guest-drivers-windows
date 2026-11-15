@@ -227,6 +227,14 @@ t12UseCpuLayout(PTRITON12_DEVICE p, PTRITON12_RESOURCE r,
         r->Desc.Layout = D3D12DDI_TL_ROW_MAJOR;
 }
 
+// Without TRITON_HOSTCAP_HOST_FEATURE_LEVEL, reserved buffers and packed mips stay as Triton had them.
+static BOOL
+t12HostTiling(PTRITON12_DEVICE p)
+{
+    return p && p->pAdapter &&
+           (p->pAdapter->HostCaps & TRITON_HOSTCAP_HOST_FEATURE_LEVEL) != 0;
+}
+
 static HRESULT APIENTRY
 t12CreateHeapAndResourceCore(D3D12DDI_HDEVICE hDevice,
                          const D3D12DDIARG_CREATEHEAP_0001 *pHeapDesc,
@@ -456,9 +464,12 @@ t12CreateHeapAndResourceCore(D3D12DDI_HDEVICE hDevice,
          * UpdateTileMappings; a placed one is backed by its heap and is
          * never mapped, so treating it as reserved leaves it unmapped
          * and reading zero. */
+        // A reserved buffer arrives with the ROW_MAJOR layout every buffer has.
         const BOOL tiled =
             (pResDesc->Layout == D3D12DDI_TL_64KB_TILE_UNDEFINED_SWIZZLE ||
-             pResDesc->Layout == D3D12DDI_TL_64KB_TILE_STANDARD_SWIZZLE) &&
+             pResDesc->Layout == D3D12DDI_TL_64KB_TILE_STANDARD_SWIZZLE ||
+             (pResDesc->ResourceType == D3D12DDI_RT_BUFFER &&
+              t12HostTiling(p))) &&
             base == NULL;
         D3D12_RESOURCE_DESC desc;
         t12ResourceDesc(pResDesc, &desc);
@@ -470,7 +481,8 @@ t12CreateHeapAndResourceCore(D3D12DDI_HDEVICE hDevice,
              * read zero.  Host RAM is then the app's tile-pool budget
              * instead of the textures' virtual size. */
             D3D12_RESOURCE_DESC rdesc = desc;
-            rdesc.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+            if (pResDesc->ResourceType != D3D12DDI_RT_BUFFER)
+                rdesc.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
             hr = ID3D12Device_CreateReservedResource(
                 p->pDev, &rdesc,
                 (D3D12_RESOURCE_STATES)pResDesc->InitialResourceState,
@@ -652,9 +664,17 @@ triton12GetMipPacking(D3D12DDI_HDEVICE hDevice, D3D12DDI_HRESOURCE hRes,
                       UINT *pNumPackedMips, UINT *pNumTilesForPackedMips)
 {
     PTRITON12_RESOURCE r = (PTRITON12_RESOURCE)hRes.pDrvPrivate;
-    (void)hDevice;
+    PTRITON12_DEVICE p = triton12Device(hDevice);
     UINT packed = 0, tiles = 0;
-    if (r && r->Desc.ResourceType != D3D12DDI_RT_BUFFER) {
+    if (r && r->TiledHost && r->pResource && t12HostTiling(p) && p->pDev) {
+        // The host maps the tail by its own tiling, which may keep sub-tile mips out of it.
+        D3D12_PACKED_MIP_INFO info;
+        memset(&info, 0, sizeof(info));
+        ID3D12Device_GetResourceTiling(p->pDev, r->pResource, NULL, &info,
+                                       NULL, NULL, 0, NULL);
+        packed = info.NumPackedMips;
+        tiles = info.NumTilesForPackedMips;
+    } else if (r && r->Desc.ResourceType != D3D12DDI_RT_BUFFER) {
         TRITON12_TILE_SHAPE tile;
         t12TileShape((DXGI_FORMAT)r->Desc.Format, &tile);
         const UINT mips = r->Desc.MipLevels ? r->Desc.MipLevels : 1;

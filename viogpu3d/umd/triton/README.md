@@ -27,6 +27,10 @@ which name what Triton needs from the stack below it.
 - `triton_backend.h`, `triton12_backend.h`, `triton_backend_null.c` and `triton_null.def` are new. The null backend
   makes nothing and links: the build links it with Triton into `triton_null.dll`, which exports `OpenAdapter10_2` and
   `OpenAdapter12`, to show no Neptune symbol is left.
+- `tritonTiled.h` is new: the tiled resources tier both layers report, without platform headers, so the driver's host
+  tests build it. With `TRITON_HOSTCAP_HOST_FEATURE_LEVEL` it is the inner device's tier, at most tier 3 (the DDIs'
+  ceiling; every tiled DDI forwards to the inner device); without it, Triton's own answers stay: none for Direct3D 11,
+  and for Direct3D 12 tier 2 at a 12_x label, none below.
 - `tritonDDI.c`: the device comes from `triton_backend_create_device` and goes with `triton_backend_destroy_device`,
   also after a failed create; the version ladder and the tile-based caps read `triton_backend_adapter_probe`;
   `OpenAdapter10_2` is `tritonOpenAdapter10_2`, not exported, and keeps the backend's adapter; CloseAdapter calls
@@ -47,6 +51,12 @@ which name what Triton needs from the stack below it.
 - `tritonDDI.c`: the slots Triton leaves unimplemented get one stub per slot type, with that slot's parameters, in
   place of one stub cast into every slot. On x86 the callee pops its arguments (stdcall), so the cast stub would
   have left the caller's stack wrong; on x64 and ARM64 nothing changes.
+- Direct3D 11 tiled resources, which were stubs: `tritonResource.c` forwards `UpdateTileMappings`,
+  `CopyTileMappings`, `CopyTiles`, `UpdateTiles`, `TiledResourceBarrier` and `ResizeTilePool` to the inner
+  `ID3D11DeviceContext2`, and `GetMipPacking` to the inner `ID3D11Device2::GetResourceTiling`; `CreateResource` passes
+  `MISC_TILED` and `MISC_TILE_POOL` on. `tritonDDI.c` puts them in the WDDM 1.3 table and answers `D3D11_OPTIONS1`
+  from `tritonTiled.h` (`tritonTiledSupportFlags`, declared in `triton.h`); `tritonQuery.c` passes the inner
+  device's per-format `TILED` bit on when that answer has a tier.
 - `tritonDxgi.c`, `tritonPresentTiming.h`, `tritonShader.c`, `tritonDxbc.c`, `triton_log.h`: the debug switches, the
   shared format, the shader workaround bits and the log go through the backend.
 - `triton.h`: `TRITON_ADAPTER` and `TRITON_DEVICE` carry `pBackend` in place of the kernel-mode state; it includes
@@ -62,7 +72,10 @@ The D3D12 layer:
   the backend calls it not adoptable; the host caps come from `triton12_backend_host_caps`; `OpenAdapter12` is
   `tritonOpenAdapter12`, not exported, and keeps the backend's adapter; CloseAdapter calls
   `triton12_backend_close_adapter`. With the new `TRITON_HOSTCAP_HOST_FEATURE_LEVEL`, the pipeline level is the inner
-  device's own highest feature level, and conservative rasterization is not claimed for the FL 12_1 label. Whether
+  device's own highest feature level, conservative rasterization is not claimed for the FL 12_1 label, and
+  `OPTIONS.TiledResourcesTier` is the inner device's (`tritonTiled.h`), where Triton reported none at an 11_x label;
+  `CheckFormatSupport` then passes the inner device's per-format `TILED` bit on. The pipeline level is worked out in
+  `t12PipelineLevel`, out of `GetCaps`. Whether
   textures on CPU-visible heaps are row major comes from `triton12_backend_host_takes_row_major_texture`; the
   `EXECUTECOMMANDLISTS_PARALLELISM` answer's note names the queue gate, not Neptune's ring.
 - `tritonHostCaps.h`, the D3D12 part: the new `TRITON_HC12_FEATURE_LEVELS` bit and `maxFeatureLevel` field;
@@ -73,7 +86,9 @@ The D3D12 layer:
 - `tritonQueue12.c`: the gate after `ExecuteCommandLists` signals the drain fence as before and then calls
   `triton12_backend_gate_queue`, in place of Neptune's gate arm and its kernel driver's gate packet; the backend's
   queue state is made and freed with the queue; no Neptune ring edges for tile mappings (the inner device orders its
-  own queues); the debug switches go through `triton_backend_debug`.
+  own queues); the debug switches go through `triton_backend_debug`. With `TRITON_HOSTCAP_HOST_FEATURE_LEVEL`, a
+  forwarded `UpdateTileMappings` or `CopyTileMappings` is ordered as a batch is: it waits on the sibling queues' drain
+  fences first and runs the same gate after, so the app's fences come after the mapping change.
 - `tritonPresent12.c`: primaries and present companions are the backend's shared surfaces
   (`triton12_backend_create_shared_surface`), where Neptune exported a host texture as a blob; memory-less
   allocations come from `triton12_backend_allocate_empty`; a flip present calls the queue gate, where Neptune armed a
@@ -83,7 +98,11 @@ The D3D12 layer:
   `WIDL_C_INLINE_WRAPPERS`.
 - `tritonResource12.c`: no shared heap flags reach the inner device; a primary is made by
   `triton12CreateSharedResource`; the companion's create moved to `tritonPresent12.c`; a resource's shared surface is
-  freed with `triton12_backend_destroy_shared_surface` before its placeholder allocation.
+  freed with `triton12_backend_destroy_shared_surface` before its placeholder allocation. With
+  `TRITON_HOSTCAP_HOST_FEATURE_LEVEL` only: a reserved buffer (no heap, no placement, the `ROW_MAJOR` layout every
+  buffer has) takes the reserved path too, where it fell to a committed buffer whose tiles nothing maps, and keeps its
+  layout; `GetMipPacking` of a reserved resource the host backs asks the inner device's `GetResourceTiling`: the host
+  maps the tail by its own tiling, and Metal keeps some mips smaller than a tile out of it.
 - `tritonPipeline12.c`: root signatures serialize through `triton12_backend_serialize_root_signature`; the vertex
   input rewrite asks `triton_backend_workaround_flags`.
 - `tritonList12.c`: the list migration switch goes through `triton_backend_debug`.

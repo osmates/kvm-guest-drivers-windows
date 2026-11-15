@@ -79,7 +79,7 @@ UINT triton12_backend_host_caps(struct TRITON12_ADAPTER *pAdapter)
     {
         return 0;
     }
-    // vkd3d-proton takes DXIL through dxil-spirv; its own feature level is the one to report.
+    // vkd3d-proton takes DXIL through dxil-spirv; report its own feature level and tiled resources tier.
     return TRITON_HOSTCAP_DXIL | TRITON_HOSTCAP_HOST_FEATURE_LEVEL;
 }
 

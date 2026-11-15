@@ -104,6 +104,8 @@ void triton_backend_adapter_probe(PTRITON_ADAPTER pAdapter, struct triton_adapte
     out->host_ok = out->viogpu;
     // viogpu3d is a WDDM 2.0 driver: dxgkrnl checks each higher DDI's features against it.
     out->wddm2_0_only = TRUE;
+    // DXVK's own tiled resources tier, which Triton forwards.
+    out->caps_flags = TRITON_HOSTCAP_HOST_FEATURE_LEVEL;
 }
 
 // One per process: each Venus instance has its own contexts on the host.

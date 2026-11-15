@@ -59,6 +59,12 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
 - Venus escapes through the runtime's `pfnEscapeCb`, which the driver wraps: a blob map whose address does not fit
   this process's pointers is unmapped and fails, so that a 32-bit process never uses the low half of a 64-bit address.
 - The DXGI DDI (present, blt, residency) is Triton's: it presents with `pfnPresentCb` and the kernel allocation above.
+- Tiled resources: Triton forwards the tile DDIs (`UpdateTileMappings`, `CopyTileMappings`, `CopyTiles`,
+  `UpdateTiles`, `TiledResourceBarrier`, `ResizeTilePool`, `GetMipPacking`) to DXVK's `ID3D11DeviceContext2` and
+  `ID3D11Device2`, which back tile pools with Vulkan sparse binding through Venus. The backend sets
+  `TRITON_HOSTCAP_HOST_FEATURE_LEVEL`, so `D3D11_OPTIONS1` reports DXVK's own tier and each format DXVK's `TILED`
+  bit (`triton/tritonTiled.h`). On OSMates' KosmicKrisp (osmates/mesa `81f3ba31`, sparse binding and residency for
+  buffers and 2D images, not residency in shaders or strict reads of unmapped tiles) that is tier 1.
 
 ## How Direct3D 12 works
 
@@ -97,6 +103,11 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
 - vkd3d-proton's disk cache: unless the process sets `VKD3D_SHADER_CACHE_PATH`, the driver sets it before
   vkd3d-proton loads, to `%LOCALAPPDATA%\viogpu3d\vkd3d-proton`, or to `0` (no disk cache) when that folder cannot
   be made: vkd3d-proton would otherwise write into the app's current folder.
+- Tiled resources: `OPTIONS.TiledResourcesTier` is vkd3d-proton's own, at most tier 3 (`triton/tritonTiled.h`): tier 1
+  on KosmicKrisp at `81f3ba31`, with feature level 11_1. Reserved textures and buffers are vkd3d-proton's reserved
+  resources; `UpdateTileMappings`, `CopyTileMappings` and `CopyTiles` go to them, `GetMipPacking` asks vkd3d-proton's
+  `GetResourceTiling`, each format carries vkd3d-proton's `TILED` bit, and each mapping change is ordered as a batch
+  is: after the other queues' earlier batches, before the app's later fences.
 - D3D9: the D3D9 slot names this DLL, which has no `OpenAdapter`. No documented key turns D3D9 over to D3D9On12 for
   a driver, so D3D9 apps get D3D9On12 on this driver only when they call `Direct3DCreate9On12` themselves.
 
@@ -180,8 +191,9 @@ Tools/build-macos.sh --d3d-umd --venus-icd <aarch64 Mesa build>/src/virtio/vulka
   back from one, their image usage and view formats, the physical device by LUID, the memory type, the memory-less
   allocation, Venus's allocate and deallocate calls in the core layer's forms (fields, `Primary` and `Stereo`, the
   allocation count's bounds, the handles copied back; `umd_vk.c` asserts the mirrored structs against the kits'
-  headers), the vkd3d-proton cache folder rule and the vkd3d-proton DLL beside each driver. Built and run twice: with
-  ASan and UBSan, and with TSan.
+  headers), the vkd3d-proton cache folder rule and the vkd3d-proton DLL beside each driver. For both: the tiled
+  resources tier Triton reports (`triton/tritonTiled.h`), for host tiers 0 to 3 at the 11_0, 11_1 and 12_0 labels,
+  with and without `TRITON_HOSTCAP_HOST_FEATURE_LEVEL`. Built and run twice: with ASan and UBSan, and with TSan.
 - `tests/check-package.sh <Install/Win11/ARM64 or Install/Win10/ARM64>`, with `MESA_SRC` the Mesa tree of the Venus
   builds and `MINGW_DIR` the llvm-mingw the DLLs were linked with: the INF and the package list the same files; the
   INF copies both Direct3D drivers, both vkd3d-proton DLLs, both Vulkan drivers, their manifests and the notices into
@@ -228,6 +240,10 @@ Tools/build-macos.sh --d3d-umd --venus-icd <aarch64 Mesa build>/src/virtio/vulka
 - Direct3D 12 gaps known now: app waits on CPU-signalled fences are kernel packets the driver never sees (Triton has
   the same gap); opened shared resources (`OpenHeapAndResource`) are refused, as in Triton; a Direct3D 12 primary
   scans out source 0.
+- Tiled resources, both APIs: that the runtimes take the tier with the per-format `TILED` bits Venus gives (no
+  combined depth and stencil on KosmicKrisp), that the Direct3D 12 runtime sends a reserved buffer with no heap and
+  no placement, as the driver takes it, and that Venus on Windows binds tiles of the memory DXVK and vkd3d-proton
+  allocate. Tier 1 leaves reads of unmapped tiles undefined; on KosmicKrisp they read zero.
 
 ## Licences
 

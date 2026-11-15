@@ -76,6 +76,8 @@ static void tritonTranslateUsage(const D3D11DDIARG_CREATERESOURCE *a,
     if (dmf & D3D11_DDI_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS) mf |= D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
     if (dmf & D3D11_DDI_RESOURCE_MISC_BUFFER_STRUCTURED)   mf |= D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
     if (dmf & D3D11_DDI_RESOURCE_MISC_RESOURCE_CLAMP)      mf |= D3D11_RESOURCE_MISC_RESOURCE_CLAMP;
+    if (dmf & D3DWDDM1_3DDI_RESOURCE_MISC_TILED)           mf |= D3D11_RESOURCE_MISC_TILED;
+    if (dmf & D3DWDDM1_3DDI_RESOURCE_MISC_TILE_POOL)       mf |= D3D11_RESOURCE_MISC_TILE_POOL;
     *pMiscFlags = mf;
 }
 
@@ -735,16 +737,186 @@ TR_CB_SETTER_11_1(CS, CSSetConstantBuffers1)
 
 #undef TR_CB_SETTER_11_1
 
-/* Tiled resources are not offered (D3DWDDM1_3DDICAPS_D3D11_OPTIONS1 reports
- * no tier), so the runtime never creates one and the tile DDIs are never
- * reached; GetMipPacking still answers "no packed mips". */
+/* ---------- tiled resources (WDDM 1.3) ---------- */
+
+// GetCaps offers a tier only with TRITON_HOSTCAP_HOST_FEATURE_LEVEL; the DDI's structs and flags are the API's.
+C_ASSERT(sizeof(D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE) == sizeof(D3D11_TILED_RESOURCE_COORDINATE));
+C_ASSERT(offsetof(D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE, Subresource) ==
+         offsetof(D3D11_TILED_RESOURCE_COORDINATE, Subresource));
+C_ASSERT(sizeof(D3DWDDM1_3DDI_TILE_REGION_SIZE) == sizeof(D3D11_TILE_REGION_SIZE));
+C_ASSERT(offsetof(D3DWDDM1_3DDI_TILE_REGION_SIZE, Width) == offsetof(D3D11_TILE_REGION_SIZE, Width));
+C_ASSERT(offsetof(D3DWDDM1_3DDI_TILE_REGION_SIZE, Depth) == offsetof(D3D11_TILE_REGION_SIZE, Depth));
+C_ASSERT((UINT)D3DWDDM1_3DDI_TILE_MAPPING_NO_OVERWRITE == (UINT)D3D11_TILE_MAPPING_NO_OVERWRITE);
+C_ASSERT((UINT)D3DWDDM_1_3DDI_TILE_RANGE_NULL == (UINT)D3D11_TILE_RANGE_NULL);
+C_ASSERT((UINT)D3DWDDM_1_3DDI_TILE_RANGE_SKIP == (UINT)D3D11_TILE_RANGE_SKIP);
+C_ASSERT((UINT)D3DWDDM_1_3DDI_TILE_RANGE_REUSE_SINGLE_TILE == (UINT)D3D11_TILE_RANGE_REUSE_SINGLE_TILE);
+C_ASSERT((UINT)D3DWDDM1_3DDI_TILE_COPY_NO_OVERWRITE == (UINT)D3D11_TILE_COPY_NO_OVERWRITE);
+C_ASSERT((UINT)D3DWDDM1_3DDI_TILE_COPY_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE ==
+         (UINT)D3D11_TILE_COPY_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
+C_ASSERT((UINT)D3DWDDM1_3DDI_TILE_COPY_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER ==
+         (UINT)D3D11_TILE_COPY_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
+
+static ID3D11Resource *
+tritonTiledInner(D3D10DDI_HRESOURCE h)
+{
+    PTRITON_RESOURCE r = (PTRITON_RESOURCE)h.pDrvPrivate;
+    return r ? r->pResource : NULL;
+}
+
+// The DDIs are void: E_OUTOFMEMORY reaches the app through the runtime, any other failure only the log.
+static void
+tritonTiledResult(PTRITON_DEVICE pD, const char *what, HRESULT hr)
+{
+    if (SUCCEEDED(hr))
+        return;
+    TR_LOG("%s: inner device failed 0x%08lx", what, (unsigned long)hr);
+    if (hr == E_OUTOFMEMORY)
+        tritonSetError(pD, hr);
+}
+
+void APIENTRY
+tritonUpdateTileMappings(D3D10DDI_HDEVICE hDevice, D3D10DDI_HRESOURCE hTiledResource,
+                         UINT NumTiledResourceRegions,
+                         const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *pTiledResourceRegionStartCoords,
+                         const D3DWDDM1_3DDI_TILE_REGION_SIZE *pTiledResourceRegionSizes,
+                         D3D10DDI_HRESOURCE hTilePool, UINT NumRanges, const UINT *pRangeFlags,
+                         const UINT *pTilePoolStartOffsets, const UINT *pRangeTileCounts, UINT Flags)
+{
+    PTRITON_DEVICE pD = (PTRITON_DEVICE)(hDevice.pDrvPrivate);
+    ID3D11Resource *res = tritonTiledInner(hTiledResource);
+    if (!pD || !pD->pCtx3 || !res) {
+        TR_STUB("UpdateTileMappings (no ID3D11DeviceContext2 or resource)");
+        return;
+    }
+    HRESULT hr = ID3D11DeviceContext3_UpdateTileMappings(
+        pD->pCtx3, res, NumTiledResourceRegions,
+        (const D3D11_TILED_RESOURCE_COORDINATE *)pTiledResourceRegionStartCoords,
+        (const D3D11_TILE_REGION_SIZE *)pTiledResourceRegionSizes,
+        (ID3D11Buffer *)tritonTiledInner(hTilePool), NumRanges, pRangeFlags,
+        pTilePoolStartOffsets, pRangeTileCounts, Flags);
+    TR_LOG_HOT("UpdateTileMappings: regions=%u ranges=%u -> 0x%08lx",
+               NumTiledResourceRegions, NumRanges, (unsigned long)hr);
+    tritonTiledResult(pD, "UpdateTileMappings", hr);
+}
+
+void APIENTRY
+tritonCopyTileMappings(D3D10DDI_HDEVICE hDevice, D3D10DDI_HRESOURCE hDestTiledResource,
+                       const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *pDestRegionStartCoord,
+                       D3D10DDI_HRESOURCE hSourceTiledResource,
+                       const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *pSourceRegionStartCoord,
+                       const D3DWDDM1_3DDI_TILE_REGION_SIZE *pTileRegionSize, UINT Flags)
+{
+    PTRITON_DEVICE pD = (PTRITON_DEVICE)(hDevice.pDrvPrivate);
+    ID3D11Resource *dst = tritonTiledInner(hDestTiledResource);
+    ID3D11Resource *src = tritonTiledInner(hSourceTiledResource);
+    if (!pD || !pD->pCtx3 || !dst || !src) {
+        TR_STUB("CopyTileMappings (no ID3D11DeviceContext2 or resource)");
+        return;
+    }
+    HRESULT hr = ID3D11DeviceContext3_CopyTileMappings(
+        pD->pCtx3, dst, (const D3D11_TILED_RESOURCE_COORDINATE *)pDestRegionStartCoord, src,
+        (const D3D11_TILED_RESOURCE_COORDINATE *)pSourceRegionStartCoord,
+        (const D3D11_TILE_REGION_SIZE *)pTileRegionSize, Flags);
+    tritonTiledResult(pD, "CopyTileMappings", hr);
+}
+
+void APIENTRY
+tritonCopyTiles(D3D10DDI_HDEVICE hDevice, D3D10DDI_HRESOURCE hTiledResource,
+                const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *pTileRegionStartCoord,
+                const D3DWDDM1_3DDI_TILE_REGION_SIZE *pTileRegionSize, D3D10DDI_HRESOURCE hBuffer,
+                UINT64 BufferStartOffsetInBytes, UINT Flags)
+{
+    PTRITON_DEVICE pD = (PTRITON_DEVICE)(hDevice.pDrvPrivate);
+    ID3D11Resource *res = tritonTiledInner(hTiledResource);
+    ID3D11Resource *buf = tritonTiledInner(hBuffer);
+    if (!pD || !pD->pCtx3 || !res || !buf) {
+        TR_STUB("CopyTiles (no ID3D11DeviceContext2 or resource)");
+        return;
+    }
+    ID3D11DeviceContext3_CopyTiles(pD->pCtx3, res,
+                                   (const D3D11_TILED_RESOURCE_COORDINATE *)pTileRegionStartCoord,
+                                   (const D3D11_TILE_REGION_SIZE *)pTileRegionSize, (ID3D11Buffer *)buf,
+                                   BufferStartOffsetInBytes, Flags);
+}
+
+void APIENTRY
+tritonUpdateTiles(D3D10DDI_HDEVICE hDevice, D3D10DDI_HRESOURCE hDestTiledResource,
+                  const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *pDestTileRegionStartCoord,
+                  const D3DWDDM1_3DDI_TILE_REGION_SIZE *pDestTileRegionSize, const VOID *pSourceTileData,
+                  UINT Flags)
+{
+    PTRITON_DEVICE pD = (PTRITON_DEVICE)(hDevice.pDrvPrivate);
+    ID3D11Resource *res = tritonTiledInner(hDestTiledResource);
+    if (!pD || !pD->pCtx3 || !res) {
+        TR_STUB("UpdateTiles (no ID3D11DeviceContext2 or resource)");
+        return;
+    }
+    ID3D11DeviceContext3_UpdateTiles(pD->pCtx3, res,
+                                     (const D3D11_TILED_RESOURCE_COORDINATE *)pDestTileRegionStartCoord,
+                                     (const D3D11_TILE_REGION_SIZE *)pDestTileRegionSize, pSourceTileData,
+                                     Flags);
+}
+
+static ID3D11DeviceChild *
+tritonTiledBarrierObject(D3D11DDI_HANDLETYPE type, VOID *h)
+{
+    if (!h)
+        return NULL;
+    switch (type) {
+    case D3D10DDI_HT_RESOURCE:
+        return (ID3D11DeviceChild *)((PTRITON_RESOURCE)h)->pResource;
+    case D3D10DDI_HT_SHADERRESOURCEVIEW:
+        return (ID3D11DeviceChild *)((PTRITON_SRVIEW)h)->pSRV;
+    case D3D10DDI_HT_RENDERTARGETVIEW:
+        return (ID3D11DeviceChild *)((PTRITON_RTVIEW)h)->pRTV;
+    case D3D10DDI_HT_DEPTHSTENCILVIEW:
+        return (ID3D11DeviceChild *)((PTRITON_DSVIEW)h)->pDSV;
+    case D3D11DDI_HT_UNORDEREDACCESSVIEW:
+        return (ID3D11DeviceChild *)((PTRITON_UAVIEW)h)->pUAV;
+    default:
+        return NULL;
+    }
+}
+
+void APIENTRY
+tritonTiledResourceBarrier(D3D10DDI_HDEVICE hDevice, D3D11DDI_HANDLETYPE BeforeType, VOID *hBefore,
+                           D3D11DDI_HANDLETYPE AfterType, VOID *hAfter)
+{
+    PTRITON_DEVICE pD = (PTRITON_DEVICE)(hDevice.pDrvPrivate);
+    if (!pD || !pD->pCtx3) {
+        TR_STUB("TiledResourceBarrier (no ID3D11DeviceContext2)");
+        return;
+    }
+    ID3D11DeviceContext3_TiledResourceBarrier(pD->pCtx3, tritonTiledBarrierObject(BeforeType, hBefore),
+                                              tritonTiledBarrierObject(AfterType, hAfter));
+}
+
+void APIENTRY
+tritonResizeTilePool(D3D10DDI_HDEVICE hDevice, D3D10DDI_HRESOURCE hTilePool, UINT64 NewSizeInBytes)
+{
+    PTRITON_DEVICE pD = (PTRITON_DEVICE)(hDevice.pDrvPrivate);
+    ID3D11Resource *pool = tritonTiledInner(hTilePool);
+    if (!pD || !pD->pCtx3 || !pool) {
+        TR_STUB("ResizeTilePool (no ID3D11DeviceContext2 or tile pool)");
+        return;
+    }
+    tritonTiledResult(pD, "ResizeTilePool",
+                      ID3D11DeviceContext3_ResizeTilePool(pD->pCtx3, (ID3D11Buffer *)pool, NewSizeInBytes));
+}
+
+// The runtime's GetResourceTiling uses these; the inner device maps the tail by its own tiling.
 void APIENTRY
 tritonGetMipPacking(D3D10DDI_HDEVICE hDevice, D3D10DDI_HRESOURCE hTiledRes,
                     UINT *pNumPackedMips, UINT *pNumTilesForPackedMips)
 {
-    (void)hDevice; (void)hTiledRes;
-    if (pNumPackedMips)         *pNumPackedMips = 0;
-    if (pNumTilesForPackedMips) *pNumTilesForPackedMips = 0;
+    PTRITON_DEVICE pD = (PTRITON_DEVICE)(hDevice.pDrvPrivate);
+    ID3D11Resource *res = tritonTiledInner(hTiledRes);
+    D3D11_PACKED_MIP_DESC packed;
+    memset(&packed, 0, sizeof(packed));
+    if (pD && pD->pDev3 && res)
+        ID3D11Device3_GetResourceTiling(pD->pDev3, res, NULL, &packed, NULL, NULL, 0, NULL);
+    if (pNumPackedMips)         *pNumPackedMips = packed.NumPackedMips;
+    if (pNumTilesForPackedMips) *pNumTilesForPackedMips = packed.NumTilesForPackedMips;
 }
 
 /* WDDM 2.0: GetResourceLayout returns the kernel allocation handle plus

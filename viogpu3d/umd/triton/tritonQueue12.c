@@ -511,6 +511,15 @@ C_ASSERT(sizeof(D3D12DDI_TILED_RESOURCE_COORDINATE) == sizeof(D3D12_TILED_RESOUR
 C_ASSERT(sizeof(D3D12DDI_TILE_REGION_SIZE) == sizeof(D3D12_TILE_REGION_SIZE));
 C_ASSERT(sizeof(D3D12DDI_TILE_RANGE_FLAGS) == sizeof(D3D12_TILE_RANGE_FLAGS));
 
+// Without TRITON_HOSTCAP_HOST_FEATURE_LEVEL a forwarded mapping change stays unordered, as Triton had it.
+static BOOL
+t12OrdersTileMappings(PTRITON12_QUEUE q)
+{
+    PTRITON12_DEVICE p = q->pDev;
+    return p && p->pAdapter &&
+           (p->pAdapter->HostCaps & TRITON_HOSTCAP_HOST_FEATURE_LEVEL) != 0;
+}
+
 static VOID APIENTRY
 t12UpdateTileMappings(D3D12DDI_HCOMMANDQUEUE hQueue, D3D12DDI_HRESOURCE hRes,
                       UINT NumRegions,
@@ -530,6 +539,10 @@ t12UpdateTileMappings(D3D12DDI_HCOMMANDQUEUE hQueue, D3D12DDI_HRESOURCE hRes,
         if (!InterlockedExchange(&onceF, 1))
             TR_LOG("12.UpdateTileMappings: forwarding to the host (sparse "
                    "backing; regions=%u ranges=%u)", NumRegions, NumRanges);
+        // Ordered as a batch is: after the sibling queues' earlier batches, before the app's later fences.
+        const BOOL ordered = t12OrdersTileMappings(q);
+        if (ordered)
+            t12OrderAgainstSiblings(q);
         ID3D12CommandQueue_UpdateTileMappings(
             q->pQueue, r->pResource, NumRegions,
             (const D3D12_TILED_RESOURCE_COORDINATE *)pCoords,
@@ -538,6 +551,8 @@ t12UpdateTileMappings(D3D12DDI_HCOMMANDQUEUE hQueue, D3D12DDI_HRESOURCE hRes,
             (const D3D12_TILE_RANGE_FLAGS *)pRangeFlags,
             pHeapStartOffsets, pRangeTileCounts,
             (D3D12_TILE_MAPPING_FLAGS)Flags);
+        if (ordered)
+            triton12QueueGate(q);
         return;
     }
     static LONG once;
@@ -561,12 +576,17 @@ t12CopyTileMappings(D3D12DDI_HCOMMANDQUEUE hQueue, D3D12DDI_HRESOURCE hDst,
         static LONG onceF;
         if (!InterlockedExchange(&onceF, 1))
             TR_LOG("12.CopyTileMappings: forwarding to the host (sparse backing)");
+        const BOOL ordered = t12OrdersTileMappings(q);
+        if (ordered)
+            t12OrderAgainstSiblings(q);
         ID3D12CommandQueue_CopyTileMappings(
             q->pQueue, d->pResource,
             (const D3D12_TILED_RESOURCE_COORDINATE *)pDstCoord, s->pResource,
             (const D3D12_TILED_RESOURCE_COORDINATE *)pSrcCoord,
             (const D3D12_TILE_REGION_SIZE *)pSize,
             (D3D12_TILE_MAPPING_FLAGS)Flags);
+        if (ordered)
+            triton12QueueGate(q);
         return;
     }
     static LONG once;

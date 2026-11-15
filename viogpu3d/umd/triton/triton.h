@@ -493,6 +493,9 @@ void tritonUpdateTirPixelShader(PTRITON_DEVICE pD);
 /* Fill r's present companion, if any (tritonResource.c). */
 void tritonResourceSyncPresentCompanion(PTRITON_DEVICE pD, PTRITON_RESOURCE r);
 
+/* The D3D11_OPTIONS1 tiled resources flags GetCaps reports (tritonDDI.c). */
+UINT tritonTiledSupportFlags(PTRITON_ADAPTER pAdapter);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

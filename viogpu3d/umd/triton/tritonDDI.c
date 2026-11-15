@@ -16,6 +16,7 @@
 #include "tritonDxgi.h"
 #include "tritonPresent.h"
 #include "tritonHostCaps.h"
+#include "tritonTiled.h"
 
 
 /* Forward declarations of handlers implemented in other translation
@@ -228,6 +229,23 @@ void   APIENTRY tritonDsSetShaderResources(D3D10DDI_HDEVICE, UINT, UINT, const D
 void   APIENTRY tritonCsSetShaderResources(D3D10DDI_HDEVICE, UINT, UINT, const D3D10DDI_HSHADERRESOURCEVIEW *);
 
 /* tritonResource.c (WDDM 1.3 / 2.0 / 2.1) */
+void   APIENTRY tritonUpdateTileMappings(D3D10DDI_HDEVICE, D3D10DDI_HRESOURCE, UINT,
+                                         const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *,
+                                         const D3DWDDM1_3DDI_TILE_REGION_SIZE *, D3D10DDI_HRESOURCE, UINT,
+                                         const UINT *, const UINT *, const UINT *, UINT);
+void   APIENTRY tritonCopyTileMappings(D3D10DDI_HDEVICE, D3D10DDI_HRESOURCE,
+                                       const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *, D3D10DDI_HRESOURCE,
+                                       const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *,
+                                       const D3DWDDM1_3DDI_TILE_REGION_SIZE *, UINT);
+void   APIENTRY tritonCopyTiles(D3D10DDI_HDEVICE, D3D10DDI_HRESOURCE,
+                                const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *,
+                                const D3DWDDM1_3DDI_TILE_REGION_SIZE *, D3D10DDI_HRESOURCE, UINT64, UINT);
+void   APIENTRY tritonUpdateTiles(D3D10DDI_HDEVICE, D3D10DDI_HRESOURCE,
+                                  const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *,
+                                  const D3DWDDM1_3DDI_TILE_REGION_SIZE *, const VOID *, UINT);
+void   APIENTRY tritonTiledResourceBarrier(D3D10DDI_HDEVICE, D3D11DDI_HANDLETYPE, VOID *,
+                                           D3D11DDI_HANDLETYPE, VOID *);
+void   APIENTRY tritonResizeTilePool(D3D10DDI_HDEVICE, D3D10DDI_HRESOURCE, UINT64);
 void   APIENTRY tritonGetMipPacking(D3D10DDI_HDEVICE, D3D10DDI_HRESOURCE, UINT *, UINT *);
 void   APIENTRY tritonGetResourceLayout(D3D10DDI_HDEVICE, D3D10DDI_HRESOURCE, UINT,
                                         D3DKMT_HANDLE *, D3DWDDM2_0DDI_TEXTURE_LAYOUT *,
@@ -284,27 +302,6 @@ TR_DECL_STUB(RelocateWDDM2_0, struct D3DWDDM2_0DDI_DEVICEFUNCS *pFuncs)
 TR_DECL_STUB(RelocateWDDM2_1, struct D3DWDDM2_1DDI_DEVICEFUNCS *pFuncs)
 TR_DECL_STUB(RelocateWDDM2_2, struct D3DWDDM2_2DDI_DEVICEFUNCS *pFuncs)
 TR_DECL_STUB(SetTextFilterSize, UINT Width, UINT Height)
-TR_DECL_STUB(UpdateTileMappings, D3D10DDI_HRESOURCE hTiledResource, UINT NumTiledResourceRegions,
-             const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *pTiledResourceRegionStartCoords,
-             const D3DWDDM1_3DDI_TILE_REGION_SIZE *pTiledResourceRegionSizes, D3D10DDI_HRESOURCE hTilePool,
-             UINT NumRanges, const UINT *pRangeFlags, const UINT *pTilePoolStartOffsets,
-             const UINT *pRangeTileCounts, UINT Flags)
-TR_DECL_STUB(CopyTileMappings, D3D10DDI_HRESOURCE hDestTiledResource,
-             const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *pDestRegionStartCoord,
-             D3D10DDI_HRESOURCE hSourceTiledResource,
-             const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *pSourceRegionStartCoord,
-             const D3DWDDM1_3DDI_TILE_REGION_SIZE *pTileRegionSize, UINT Flags)
-TR_DECL_STUB(CopyTiles, D3D10DDI_HRESOURCE hTiledResource,
-             const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *pTileRegionStartCoord,
-             const D3DWDDM1_3DDI_TILE_REGION_SIZE *pTileRegionSize, D3D10DDI_HRESOURCE hBuffer,
-             UINT64 BufferStartOffsetInBytes, UINT Flags)
-TR_DECL_STUB(UpdateTiles, D3D10DDI_HRESOURCE hDestTiledResource,
-             const D3DWDDM1_3DDI_TILED_RESOURCE_COORDINATE *pDestTileRegionStartCoord,
-             const D3DWDDM1_3DDI_TILE_REGION_SIZE *pDestTileRegionSize, const VOID *pSourceTileData, UINT Flags)
-TR_DECL_STUB(TiledResourceBarrier, D3D11DDI_HANDLETYPE TiledResourceAccessBeforeBarrierHandleType,
-             VOID *hTiledResourceAccessBeforeBarrier, D3D11DDI_HANDLETYPE TiledResourceAccessAfterBarrierHandleType,
-             VOID *hTiledResourceAccessAfterBarrier)
-TR_DECL_STUB(ResizeTilePool, D3D10DDI_HRESOURCE hTilePool, UINT64 NewSizeInBytes)
 
 /* GCC's -Wcast-function-type is unhelpful for the shader slots, whose
  * D3D10 and D3D11.1 types differ only in pointer types. */
@@ -546,13 +543,13 @@ static void tritonFillWDDM1_3DeviceFuncs(D3DWDDM1_3DDI_DEVICEFUNCS *p)
     p->pfnRelocateDeviceFuncs           = tritonStubRelocateWDDM1_3;
     p->pfnCheckMultisampleQualityLevels = tritonCheckMultisampleQualityLevels_1_3;
 
-    p->pfnUpdateTileMappings   = tritonStubUpdateTileMappings;
-    p->pfnCopyTileMappings     = tritonStubCopyTileMappings;
-    p->pfnCopyTiles            = tritonStubCopyTiles;
-    p->pfnUpdateTiles          = tritonStubUpdateTiles;
-    p->pfnTiledResourceBarrier = tritonStubTiledResourceBarrier;
+    p->pfnUpdateTileMappings   = tritonUpdateTileMappings;
+    p->pfnCopyTileMappings     = tritonCopyTileMappings;
+    p->pfnCopyTiles            = tritonCopyTiles;
+    p->pfnUpdateTiles          = tritonUpdateTiles;
+    p->pfnTiledResourceBarrier = tritonTiledResourceBarrier;
     p->pfnGetMipPacking        = tritonGetMipPacking;
-    p->pfnResizeTilePool       = tritonStubResizeTilePool;
+    p->pfnResizeTilePool       = tritonResizeTilePool;
     p->pfnSetMarker            = tritonSetMarker;
     p->pfnSetMarkerMode        = tritonSetMarkerMode;
 }
@@ -1057,6 +1054,26 @@ static const struct triton_host_caps11 *tritonHostCaps(PTRITON_ADAPTER pAdapter)
     return pAdapter->pHostCaps11 ? pAdapter->pHostCaps11 : &kNone;
 }
 
+C_ASSERT(TRITON_TILED_LEVEL_11_0 == D3D_FEATURE_LEVEL_11_0);
+C_ASSERT(TRITON_TILED_LEVEL_11_1 == D3D_FEATURE_LEVEL_11_1);
+C_ASSERT(TRITON_TILED_LEVEL_12_0 == D3D_FEATURE_LEVEL_12_0);
+C_ASSERT((1u << TRITON_TILED_TIER_MAX) - 1 ==
+         (D3DWDDM1_3DDI_TILED_RESOURCES_TIER_1_SUPPORTED |
+          D3DWDDM1_3DDI_TILED_RESOURCES_TIER_2_SUPPORTED |
+          D3DWDDM2_0DDI_TILED_RESOURCES_TIER_3_SUPPORTED));
+
+// OPTIONS1.TiledResourcesSupportFlags, which CheckFormatSupport's TILED bit follows.
+UINT tritonTiledSupportFlags(PTRITON_ADAPTER pAdapter)
+{
+    const struct triton_host_caps11 *hc = tritonHostCaps(pAdapter);
+    struct triton_adapter_probe probe;
+    triton_backend_adapter_probe(pAdapter, &probe);
+    return tritonTiledFlags11(
+        (hc->have & TRITON_HC11_OPTIONS2) ? (unsigned)hc->options2.TiledResourcesTier : 0u,
+        (unsigned)hc->featureLevel,
+        (probe.caps_flags & TRITON_HOSTCAP_HOST_FEATURE_LEVEL) != 0);
+}
+
 #define HC11(bit) ((hc->have & TRITON_HC11_##bit) != 0)
 #define CAP11_HOST(name, lv, bit, hv) \
     TRITON_CAP_HOST("d3d11", name, lv, HC11(bit), hv)
@@ -1192,18 +1209,16 @@ static HRESULT APIENTRY tritonGetCaps(D3D10DDI_HADAPTER hAdapter,
         break;
     }
     case D3DWDDM1_3DDICAPS_D3D11_OPTIONS1: {
-        /* Tiled resources need the WDDM 1.3 tile-mapping DDI entry
-         * points, which are stubs; the flags stay clear
-         * whatever the host's tier.  The field is a cumulative
-         * D3DWDDM1_3DDI_TILED_RESOURCES_SUPPORT_FLAG bitmask (tier N =
-         * (1 << N) - 1), not the API's ordinal tier, so the host tier
-         * is encoded as flags before it enters the ledger. */
+        /* A cumulative D3DWDDM1_3DDI_TILED_RESOURCES_SUPPORT_FLAG bitmask
+         * (tier N = (1 << N) - 1), not the API's ordinal tier, so the host
+         * tier is encoded as flags before it enters the ledger. */
         D3DWDDM1_3DDI_D3D11_OPTIONS_DATA1 *pCaps =
             (D3DWDDM1_3DDI_D3D11_OPTIONS_DATA1 *)pArgs->pData;
-        CAP11_TODO("D3D11_OPTIONS1.TiledResourcesSupportFlags",
-                   pCaps->TiledResourcesSupportFlags, OPTIONS2,
-                   (1u << hc->options2.TiledResourcesTier) - 1, 0,
-                   "tiled resources not wired (MISC_TILED/TILE_POOL dropped at create, tile DDIs stubbed)");
+        CAP11_FIXED("D3D11_OPTIONS1.TiledResourcesSupportFlags",
+                    pCaps->TiledResourcesSupportFlags, OPTIONS2,
+                    (1u << tritonTiledClamp((unsigned)hc->options2.TiledResourcesTier)) - 1,
+                    tritonTiledSupportFlags(pAdapter),
+                    "the host's tier, forwarded, at most TIER_3, with TRITON_HOSTCAP_HOST_FEATURE_LEVEL; else none");
         break;
     }
     case D3DWDDM2_0DDICAPS_D3D11_OPTIONS2: {

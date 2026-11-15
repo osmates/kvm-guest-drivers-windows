@@ -13,6 +13,8 @@
 #include "umd_shared.h"
 #include "umd_vk_chain.h"
 
+#include "../triton/tritonTiled.h"
+
 #include <pthread.h>
 #include <sched.h>
 #include <stdatomic.h>
@@ -1135,6 +1137,68 @@ static void eachDriverLoadsItsOwnVkd3d(void)
     CHECK(wcscmp(out, want) == 0);
 }
 
+// Labels 11_0, 11_1 and 12_0 by host tier 0 to 3.
+static const unsigned tiledLabels[3] = {0xb000u, 0xb100u, 0xc000u};
+
+static void d3d12TiledTierFollowsTheLabelWithoutTheHostLevel(void)
+{
+    static const unsigned want[3][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}, {2, 2, 2, 2}};
+
+    for (unsigned label = 0; label < 3; label++)
+    {
+        for (unsigned host = 0; host < 4; host++)
+        {
+            CHECK(tritonTiledTier12(host, tiledLabels[label], 0) == want[label][host]);
+        }
+    }
+    CHECK(tritonTiledTier12(0, 0xc100u, 0) == 2);
+}
+
+static void d3d12TiledTierIsTheHostsWithTheHostLevel(void)
+{
+    static const unsigned want[3][4] = {{0, 1, 2, 3}, {0, 1, 2, 3}, {0, 1, 2, 3}};
+
+    for (unsigned label = 0; label < 3; label++)
+    {
+        for (unsigned host = 0; host < 4; host++)
+        {
+            CHECK(tritonTiledTier12(host, tiledLabels[label], 1) == want[label][host]);
+        }
+    }
+    // vkd3d-proton on KosmicKrisp: tier 1 at 11_1.
+    CHECK(tritonTiledTier12(1, 0xb100u, 1) == 1);
+    // vkd3d-proton goes from tier 2 to 4; the DDI before 0117 has no 4.
+    CHECK(tritonTiledTier12(4, 0xc000u, 1) == 3);
+}
+
+static void d3d11TiledFlagsAreNoneWithoutTheHostLevel(void)
+{
+    for (unsigned label = 0; label < 3; label++)
+    {
+        for (unsigned host = 0; host < 4; host++)
+        {
+            CHECK(tritonTiledFlags11(host, tiledLabels[label], 0) == 0);
+        }
+    }
+}
+
+static void d3d11TiledFlagsAreTheHostsTierWithTheHostLevel(void)
+{
+    static const unsigned want[3][4] = {{0, 0x1, 0x1, 0x1}, {0, 0x1, 0x3, 0x7}, {0, 0x1, 0x3, 0x7}};
+
+    for (unsigned label = 0; label < 3; label++)
+    {
+        for (unsigned host = 0; host < 4; host++)
+        {
+            CHECK(tritonTiledFlags11(host, tiledLabels[label], 1) == want[label][host]);
+        }
+    }
+    // DXVK on KosmicKrisp: tier 1 at 11_1.
+    CHECK(tritonTiledFlags11(1, 0xb100u, 1) == 0x1);
+    CHECK(tritonTiledFlags11(4, 0xb100u, 1) == 0x7);
+    CHECK(tritonTiledFlags11(1, 0xa100u, 1) == 0);
+}
+
 int main(void)
 {
     adapterWithVenusIsTaken();
@@ -1176,6 +1240,10 @@ int main(void)
     deallocationsTakeTheCoreLayersForm();
     vkd3dCacheGoesUnderLocalAppData();
     eachDriverLoadsItsOwnVkd3d();
+    d3d12TiledTierFollowsTheLabelWithoutTheHostLevel();
+    d3d12TiledTierIsTheHostsWithTheHostLevel();
+    d3d11TiledFlagsAreNoneWithoutTheHostLevel();
+    d3d11TiledFlagsAreTheHostsTierWithTheHostLevel();
 
     printf("umd host tests: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

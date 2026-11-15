@@ -156,8 +156,9 @@ tritonSetPredication(D3D10DDI_HDEVICE hDevice, D3D10DDI_HQUERY hPred, BOOL Predi
  * can't infer from the feature level, and it merges what the API splits
  * across FORMAT_SUPPORT and FORMAT_SUPPORT2, so it must be translated
  * bit-by-bit rather than forwarded. Unmapped DDI bits with no
- * CheckFormatSupport API equivalent (CAPTURE, MULTIPLANE_OVERLAY, TILED,
- * DISPLAYABLE, video decode/encode) stay 0. */
+ * CheckFormatSupport API equivalent (CAPTURE, MULTIPLANE_OVERLAY,
+ * DISPLAYABLE, video decode/encode) stay 0. tritonCheckFormatSupport sets
+ * TILED while D3D11_OPTIONS1 reports a tier. */
 /* tritonMsaaQuality is the single source of truth for multisample support,
  * shared by CheckMultisampleQualityLevels AND the CheckFormatSupport
  * MULTISAMPLE_RENDERTARGET bit.  The D3D11 runtime validates both during
@@ -514,6 +515,8 @@ tritonCheckFormatSupport(D3D10DDI_HDEVICE hDevice, DXGI_FORMAT Format, UINT *pOu
     else if (!tritonHostAnswered(fs2Hr))
         answered = FALSE;
     *pOut = tritonTranslateFormatSupport(s1, s2);
+    if ((s2 & D3D11_FORMAT_SUPPORT2_TILED) && tritonTiledSupportFlags(pD->pAdapter))
+        *pOut |= D3DWDDM1_3DDI_FORMAT_SUPPORT_TILED;
 
     /* A typeless parent reports what its family can do: the host answers for
      * the typeless format itself carry no target or multisample capability
