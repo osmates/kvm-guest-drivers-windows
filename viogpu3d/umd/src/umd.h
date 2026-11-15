@@ -89,11 +89,6 @@ void umd_device_callbacks_fini(struct umd_device *dev);
 // the ICD.
 PFN_vkGetInstanceProcAddr umd_vk_loader(void);
 
-// While set on a thread, a vkCreateInstance through umd_vk_loader carries callbacks, which must live as long as the
-// instance.
-void umd_vk_instance_callbacks_begin(VkD3DDDICallbacksMESA *callbacks);
-void umd_vk_instance_callbacks_end(void);
-
 // The ICD's device entry points come from an instance of it: the first one this driver sees.
 void umd_vk_note_instance(VkInstance instance);
 

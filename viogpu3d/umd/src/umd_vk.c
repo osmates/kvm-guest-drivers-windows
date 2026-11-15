@@ -28,7 +28,6 @@ static PFN_vkGetDeviceProcAddr volatile umd_icd_gdpa;
 static PFN_vkAllocateMemory volatile umd_icd_allocate;
 
 static _Thread_local struct umd_vk_pending *umd_pending;
-static _Thread_local VkD3DDDICallbacksMESA *umd_instance_callbacks;
 
 static SRWLOCK umd_devices_lock = SRWLOCK_INIT;
 static struct umd_device *umd_devices;
@@ -111,33 +110,6 @@ void umd_vk_note_instance(VkInstance instance)
     }
 }
 
-// vkd3d-proton makes its instance itself, with no pNext: the runtime's callbacks go in here.
-static VKAPI_ATTR VkResult VKAPI_CALL umd_vk_create_instance(const VkInstanceCreateInfo *info,
-                                                             const VkAllocationCallbacks *allocator,
-                                                             VkInstance *instance)
-{
-    VkD3DDDICallbacksMESA *callbacks = umd_instance_callbacks;
-    PFN_vkCreateInstance create = (PFN_vkCreateInstance)umd_vk_icd_instance_proc(VK_NULL_HANDLE, "vkCreateInstance");
-    VkInstanceCreateInfo chained;
-    VkResult result;
-
-    if (create == NULL || info == NULL)
-    {
-        return VK_ERROR_INITIALIZATION_FAILED;
-    }
-    if (callbacks == NULL)
-    {
-        return create(info, allocator, instance);
-    }
-    // Venus keeps this very struct, and writes to it, for the instance's life: no copy of it goes in the chain.
-    chained = *info;
-    callbacks->pNext = (void *)info->pNext;
-    chained.pNext = callbacks;
-    result = create(&chained, allocator, instance);
-    callbacks->pNext = NULL;
-    return result;
-}
-
 static PFN_vkVoidFunction umd_vk_hook(const char *name)
 {
     if (strcmp(name, "vkGetDeviceProcAddr") == 0)
@@ -175,10 +147,6 @@ static PFN_vkVoidFunction VKAPI_CALL umd_vk_get_instance_proc_addr(VkInstance in
     {
         return (PFN_vkVoidFunction)umd_vk_get_instance_proc_addr;
     }
-    if (strcmp(name, "vkCreateInstance") == 0 && instance == VK_NULL_HANDLE)
-    {
-        return (PFN_vkVoidFunction)umd_vk_create_instance;
-    }
     hook = umd_vk_hook(name);
     if (hook != NULL && instance != VK_NULL_HANDLE)
     {
@@ -196,16 +164,6 @@ PFN_vkGetInstanceProcAddr umd_vk_loader(void)
 {
     InitOnceExecuteOnce(&umd_icd_once, umd_icd_load, NULL, NULL);
     return umd_icd_gipa != NULL ? umd_vk_get_instance_proc_addr : NULL;
-}
-
-void umd_vk_instance_callbacks_begin(VkD3DDDICallbacksMESA *callbacks)
-{
-    umd_instance_callbacks = callbacks;
-}
-
-void umd_vk_instance_callbacks_end(void)
-{
-    umd_instance_callbacks = NULL;
 }
 
 PFN_vkVoidFunction umd_vk_icd_instance_proc(VkInstance instance, const char *name)

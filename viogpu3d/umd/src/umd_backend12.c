@@ -158,9 +158,9 @@ static HRESULT umd12_vkd3d_device(const struct umd_vkd3d_api *api,
     }
     memset(&instanceInfo, 0, sizeof(instanceInfo));
     instanceInfo.pfn_vkGetInstanceProcAddr = loader;
-    umd_vk_instance_callbacks_begin(callbacks);
+    // Venus keeps this very struct, and writes to it, for the instance's life: no copy of it goes in the chain.
+    instanceInfo.vk_instance_create_info_next = callbacks;
     hr = api->create_instance(&instanceInfo, &instance);
-    umd_vk_instance_callbacks_end();
     if (FAILED(hr))
     {
         umd_log("vkd3d-proton made no instance on Venus: 0x%08lx", (unsigned long)hr);

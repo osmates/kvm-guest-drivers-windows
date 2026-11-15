@@ -6,9 +6,9 @@
 #pragma once
 
 // What this driver calls of vkd3d-proton, which it loads from viogpu3d_vkd3d.dll at run time: the vkd3d.h API and
-// ID3D12DeviceExt1 of vkd3d-proton v3.1 (include/vkd3d.h, include/vkd3d_device_vkd3d_ext.idl), with the same layouts.
-// vkd3d/vkd3d_abi_check.c checks them against those headers when the package is built. Only plain Windows and Vulkan
-// types here, so that the check can include this beside vkd3d-proton's own headers.
+// ID3D12DeviceExt1 of the vkd3d-proton submodule (include/vkd3d.h, include/vkd3d_device_vkd3d_ext.idl), with the same
+// layouts. vkd3d/vkd3d_abi_check.c checks them against those headers when the package is built. Only plain Windows
+// and Vulkan types here, so that the check can include this beside vkd3d-proton's own headers.
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -29,6 +29,7 @@ struct umd_vkd3d_instance_create_info
     uint32_t instance_extension_count;
     const char *const *optional_instance_extensions;
     uint32_t optional_instance_extension_count;
+    const void *vk_instance_create_info_next;
 };
 
 struct umd_vkd3d_device_create_info

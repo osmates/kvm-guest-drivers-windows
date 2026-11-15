@@ -14,16 +14,17 @@
 # - viogpu3d_umd.dll, viogpu3d_vkd3d.dll and vulkan_virtio.dll are ARM64X, with a native and an ARM64EC view;
 #   viogpu3d_umd_x86.dll, viogpu3d_vkd3d_x86.dll and vulkan_virtio_x86.dll are x86;
 # - each view of each Direct3D driver exports OpenAdapter10_2 and OpenAdapter12 only, by those names (undecorated on
-#   x86, where the functions are stdcall), each view of each vkd3d-proton DLL the vkd3d.h API of
-#   viogpu3d/umd/vkd3d/viogpu3d_vkd3d.def, and each view of each Vulkan driver the loader's three vk_icd entry points;
-# - every view imports system DLLs only, and vkd3d-proton's dxgi.dll too; no view of a Direct3D driver imports a
-#   D3DKMT function (the vkd3d-proton DLLs import their own);
+#   x86, where the functions are stdcall), each view of each vkd3d-proton DLL the vkd3d.h API of the vkd3d-proton
+#   submodule's libs/vkd3d-proton/vkd3d-proton.def, and each view of each Vulkan driver the loader's three vk_icd
+#   entry points;
+# - every view imports system DLLs only; no view of a Direct3D driver or of a vkd3d-proton DLL imports a D3DKMT
+#   function;
 # - the file version of all six DLLs is the INF's DriverVer version;
 # - the notices file carries the full licence of Triton, of DXVK and of each of DXVK's subprojects, of vkd3d-proton
-#   (LGPL-2.1, with its copyright statement, the commit this tree's submodule is at, and where its source is), of
-#   dxil-spirv and of dxbc-spirv, as this tree has them, the licences llvm-mingw ships for its runtime, as MINGW_DIR
-#   has them, and a Mesa part naming MIT, with copyright lines, whose every licence text is the one in
-#   MESA_SRC/licenses.
+#   (LGPL-2.1, with its copyright statement, that it is a modified one, the fork and the commit this tree's submodule
+#   is at, and where its source is), of dxil-spirv and of dxbc-spirv, as this tree has them, the licences llvm-mingw
+#   ships for its runtime, as MINGW_DIR has them, and a Mesa part naming MIT, with copyright lines, whose every
+#   licence text is the one in MESA_SRC/licenses.
 #
 # Needs llvm-objdump and llvm-readobj (LLVM_OBJDUMP and LLVM_READOBJ, else in LLVM_BIN, else on PATH, else
 # Homebrew's llvm), python3, MESA_SRC: the Mesa tree the Venus drivers were built from, and MINGW_DIR: the llvm-mingw
@@ -234,11 +235,14 @@ EOF
         head -n 2 "$PACK/$NOTICES" | tr '\n' ' ' | grep -q -F "$dll" || fail "$NOTICES does not name $dll"
     done
     commit=$(git -C "$UMD_SRC/vkd3d-proton" rev-parse HEAD 2>/dev/null || true)
-    if [ -n "$commit" ] && grep -q -F "(commit $commit)" "$PACK/$NOTICES" &&
+    if [ -n "$commit" ] && grep -q -F "of https://github.com/osmates/vkd3d-proton branch osmates (commit $commit)" \
+        "$PACK/$NOTICES" && grep -q -F "It is a modified vkd3d-proton (LGPL-2.1 section 2)" "$PACK/$NOTICES" &&
         grep -q -F "Source: the complete source of these DLLs" "$PACK/$NOTICES"; then
-        pass "$NOTICES says which vkd3d-proton ($commit) the DLLs are and where its source is"
+        pass "$NOTICES says the DLLs are a modified vkd3d-proton, which fork and commit ($commit), and where its" \
+            "source is"
     else
-        fail "$NOTICES does not name vkd3d-proton's commit '$commit' and where its source is"
+        fail "$NOTICES does not say the DLLs are a modified vkd3d-proton, of osmates/vkd3d-proton at '$commit'," \
+            "and where its source is"
     fi
 fi
 
@@ -319,15 +323,16 @@ check_dll() {
 
 check_dll $UMD arm64x "" OpenAdapter10_2 OpenAdapter12
 check_dll $UMD_X86 i386 "" OpenAdapter10_2 OpenAdapter12
-# vkd3d-proton's d3d12core.dll objects call CreateDXGIFactory1 on a path the driver never takes; the DLL is theirs.
-vkd3d_exports=$(tr -d '\r' <"$UMD_SRC/vkd3d/viogpu3d_vkd3d.def" | awk 'NR > 1 && NF { print $1 }')
-check_dll $VKD3D arm64x dxgi $vkd3d_exports
-check_dll $VKD3D_X86 i386 dxgi $vkd3d_exports
+vkd3d_exports=$(tr -d '\r' <"$UMD_SRC/vkd3d-proton/libs/vkd3d-proton/vkd3d-proton.def" |
+    awk '$1 == "EXPORTS" { e = 1; next } e && NF { print $1 }')
+check_dll $VKD3D arm64x "" $vkd3d_exports
+check_dll $VKD3D_X86 i386 "" $vkd3d_exports
 check_dll $ICD arm64x "" vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr vk_icdNegotiateLoaderICDInterfaceVersion
 check_dll $ICD_X86 i386 "" vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr vk_icdNegotiateLoaderICDInterfaceVersion
 
-# DXVK's GDI interop, keyed mutexes and NT handle sharing are built out of the Direct3D drivers.
-for dll in $UMD $UMD_X86; do
+# DXVK's GDI interop, keyed mutexes and NT handle sharing are built out of the Direct3D drivers, and vkd3d-proton's
+# kernel device and shared handles out of its DLLs: the runtime's callbacks and the runtime itself do that.
+for dll in $UMD $UMD_X86 $VKD3D $VKD3D_X86; do
     [ -f "$PACK/$dll" ] || continue
     kmt=$(views "$PACK/$dll" | awk '$2 == "symbol" && $3 ~ /^D3DKMT/ { print $1 ":" $3 }' | sort -u)
     [ -z "$kmt" ] && pass "$dll imports no D3DKMT function" || fail "$dll imports $(echo $kmt)"

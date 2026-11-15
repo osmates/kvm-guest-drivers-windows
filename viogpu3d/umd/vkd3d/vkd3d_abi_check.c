@@ -25,6 +25,7 @@ UMD_SAME_FIELD(struct vkd3d_instance_create_info, struct umd_vkd3d_instance_crea
 UMD_SAME_FIELD(struct vkd3d_instance_create_info,
                struct umd_vkd3d_instance_create_info,
                optional_instance_extension_count);
+UMD_SAME_FIELD(struct vkd3d_instance_create_info, struct umd_vkd3d_instance_create_info, vk_instance_create_info_next);
 
 _Static_assert(sizeof(struct vkd3d_device_create_info) == sizeof(struct umd_vkd3d_device_create_info),
                "vkd3d_device_create_info changed size");

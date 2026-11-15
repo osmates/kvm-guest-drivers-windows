@@ -26,8 +26,8 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
   below through `triton/triton_backend.h` and `triton/triton12_backend.h`.
 - `src/`: this driver's own code: `OpenAdapter10_2`, `OpenAdapter12` and the backends Triton calls.
 - `dxvk/`: DXVK, D3D11 on Vulkan, linked in statically (submodule, below).
-- `vkd3d-proton/`: vkd3d-proton, D3D12 on Vulkan, LGPL-2.1, unmodified (submodule, below), and `vkd3d/`: the export
-  list and version resource its own `d3d12core.dll` objects are linked again with.
+- `vkd3d-proton/`: vkd3d-proton, D3D12 on Vulkan, LGPL-2.1, OSMates' fork (submodule, below), and `vkd3d/`: the
+  version resource its `vkd3d-proton.dll` is linked again with, and the check of this driver's copy of its API.
 - Mesa's Venus ICD, which the package installs next to these DLLs: `vulkan_virtio.dll` (ARM64X) for the ARM64X driver,
   `vulkan_virtio_x86.dll` for the x86 one.
 
@@ -89,12 +89,12 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
   feature level 12_2 specification asks. Nothing else holds it: the kernel driver reports no level.
 - The first `GetCaps` or `CreateDevice` of a Direct3D 12 process loads `viogpu3d_vkd3d.dll` beside this DLL by path,
   and the driver calls the `vkd3d.h` API by `GetProcAddress`. vkd3d-proton makes its Vulkan instance through this
-  driver's `vkGetInstanceProcAddr`, whose `vkCreateInstance` puts `VkD3DDDICallbacksMESA` in front of the create
-  info, so Venus sends its contexts, sync objects, submissions and escapes through the Direct3D 12 runtime's
-  kernel-thunk callbacks. Its kernel-thunk table has no `pfnAllocateCb`: allocations go to the core layer's
-  `pfnAllocateCb` and `pfnDeallocateCb`, translated to their Direct3D 12 forms (`umd_d3d12_allocate_args`), with
-  Venus's resource handle, which is NULL for memory no runtime resource asked for. The device is on the Venus
-  physical device with the adapter's LUID.
+  driver's `vkGetInstanceProcAddr`, with the device's `VkD3DDDICallbacksMESA` chained to its `VkInstanceCreateInfo`
+  (`vk_instance_create_info_next` of the fork's `vkd3d_instance_create_info`), so Venus sends its contexts, sync
+  objects, submissions and escapes through the Direct3D 12 runtime's kernel-thunk callbacks. Its kernel-thunk table
+  has no `pfnAllocateCb`: allocations go to the core layer's `pfnAllocateCb` and `pfnDeallocateCb`, translated to
+  their Direct3D 12 forms (`umd_d3d12_allocate_args`), with Venus's resource handle, which is NULL for memory no
+  runtime resource asked for. The device is on the Venus physical device with the adapter's LUID.
 - `CreateDevice` logs which of the callbacks Venus calls this runtime fills, and refuses the device when the
   kernel-thunk `pfnCreateContextVirtualCb` is NULL: Venus makes its ring contexts with it, and nothing documents it
   under Direct3D 12.
@@ -141,24 +141,37 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
 
 ## vkd3d-proton
 
-- `vkd3d-proton` is a submodule of upstream vkd3d-proton (github.com/HansKristian-Work/vkd3d-proton, LGPL-2.1) at its
-  `v3.1` release, `4522cc1a8b13`, with no change of OSMates'. The build refuses a checkout at another commit or with
-  changes, its submodules included.
+- `vkd3d-proton` is a submodule of OSMates' vkd3d-proton fork, github.com/osmates/vkd3d-proton branch `osmates`
+  (LGPL-2.1): upstream's `v3.1` release, `4522cc1a8b13`, and three commits on it, none of which changes a build or
+  a caller that does not ask for it:
+  - a meson `enable_library` option that builds `vkd3d-proton.dll`, which exports the API of `include/vkd3d.h`
+    (`vkd3d_create_instance` takes a `vkGetInstanceProcAddr`) and nothing else, where the stock `d3d12core.dll`
+    exports only `D3D12GetInterface`, which makes its device on whatever `vulkan-1.dll` it finds;
+  - a meson `enable_d3dkmt` option, on by default; off, vkd3d-proton calls no `D3DKMT` function (below);
+  - `vk_instance_create_info_next` in `vkd3d_instance_create_info`, chained to the `VkInstanceCreateInfo` of the
+    instance (NULL keeps the old behaviour): this driver's `VkD3DDDICallbacksMESA` goes there, the device's own
+    struct, which Venus keeps and writes to.
+- The build takes the submodule at the commit this tree records, on top of `v3.1`, its own submodules at the commits
+  it records. It refuses changes no commit holds; `VKD3D_ALLOW_CHANGES=1` builds them anyway, and the notices then
+  call the DLLs a test build.
 - The build runs vkd3d-proton's own meson twice, for ARM64X (as its own `build-arm64x.txt`: the ARM64EC compiler with
-  `-marm64x`) and for i686, and builds its `d3d12core.dll`. That DLL exports only `D3D12GetInterface`, which makes its
-  device on whatever `vulkan-1.dll` it finds, with no way to give it Venus with the runtime's callbacks. So the build
-  links the same objects again with ninja's own link command and two changes: `vkd3d/viogpu3d_vkd3d.def`, which
-  exports the API of vkd3d-proton's `include/vkd3d.h` (`vkd3d_create_instance` takes a `vkGetInstanceProcAddr`), and
-  the version resource of `vkd3d/viogpu3d_vkd3d.rc`.
+  `-marm64x`) and for i686, with `-Denable_library=true -Denable_d3dkmt=false`, builds its `vkd3d-proton.dll`, and
+  links it again with ninja's own link command into `viogpu3d_vkd3d.dll` and `viogpu3d_vkd3d_x86.dll`, adding the
+  version resource of `vkd3d/viogpu3d_vkd3d.rc`, as it does for the Venus DLLs.
 - `vkd3d/vkd3d_abi_check.c`, compiled against the headers of the build, checks that `src/umd_vkd3d_api.h`, this
   driver's copy of the `vkd3d.h` structs and of `ID3D12DeviceExt1`, has their layouts.
 - The driver loads the DLL by path at run time and calls only functions of `include/vkd3d.h` and
-  `ID3D12DeviceExt1::CreateResourceFromBorrowedHandle`, so a vkd3d-proton built and linked the same way can take its
-  place.
-- vkd3d-proton's `D3DKMT` imports (`GDI32`) and its `dxgi.dll` import come with it. Of these, the driver's path
-  reaches only `D3DKMTOpenAdapterFromLuid` and `D3DKMTCreateDevice`, with which vkd3d-proton opens a kernel device of
-  its own beside each of its devices; its shared-resource code is never reached (the driver passes no
-  `D3D12_HEAP_FLAG_SHARED`), and neither is `dxgi.dll` (the driver never calls `D3D12GetInterface`).
+  `ID3D12DeviceExt1::CreateResourceFromBorrowedHandle`, so a vkd3d-proton built the same way can take its place.
+- Without D3DKMT, vkd3d-proton opens no kernel device of its own beside each of its devices
+  (`D3DKMTOpenAdapterFromLuid`, `D3DKMTCreateDevice`, `D3DKMTCloseAdapter`, `D3DKMTDestroyDevice`); shared heaps,
+  resources and fences are no kernel objects of its own (`D3DKMTOpenResourceFromNtHandle`,
+  `D3DKMTOpenSyncObjectFromNtHandle`, `D3DKMTEscape`, `D3DKMTDestroyAllocation`, `D3DKMTDestroyKeyedMutex`,
+  `D3DKMTDestroySynchronizationObject`); and `ID3D12Device::CreateSharedHandle` and `OpenSharedHandle` return
+  `E_NOTIMPL` (`D3DKMTShareObjects`, `D3DKMTQueryResourceInfo`, `D3DKMTOpenResource2`,
+  `D3DKMTQueryResourceInfoFromNtHandle`), as on vkd3d-proton's other platforms. Above this driver the Direct3D 12
+  runtime does all of that itself, and Triton never asks vkd3d-proton for it: it passes no `D3D12_HEAP_FLAG_SHARED`
+  or `D3D12_FENCE_FLAG_SHARED`, calls neither method, and refuses `OpenHeapAndResource`. The DLLs import neither
+  `GDI32.dll` nor `dxgi.dll`.
 
 ## Building
 
@@ -182,7 +195,7 @@ Tools/build-macos.sh --d3d-umd --venus-icd <aarch64 Mesa build>/src/virtio/vulka
   Triton linked with the null backend to show Triton needs nothing else; one folder per target with its DXVK build,
   Triton and the driver's objects; `vkd3d/` with vkd3d-proton's two builds.
 - The build fails when the driver's own objects or Triton's call a `D3DKMT` function: they go through the runtime's
-  callbacks.
+  callbacks. The package check fails a Direct3D driver or a vkd3d-proton DLL that imports one.
 - The DLLs' version resource (`viogpu3d_umd.rc`, `vkd3d/viogpu3d_vkd3d.rc`) takes the defines of `viogpu3d.sys`, so
   their file version is the INF's `DriverVer`. Mesa's builds have none: the package build links both Venus DLLs
   again from their builds' link commands with `vulkan_virtio.rc`, the same way.
@@ -220,10 +233,11 @@ Tools/build-macos.sh --d3d-umd --venus-icd <aarch64 Mesa build>/src/virtio/vulka
   slots; `VulkanDriverName` and `VulkanDriverNameWow` name the two manifests there, whose `library_path` is the DLL
   beside them; the Direct3D, vkd3d-proton and Vulkan DLLs are ARM64X with an ARM64EC view, or x86; every view exports
   `OpenAdapter10_2` and `OpenAdapter12` only (undecorated on x86, as the runtime looks them up), the `vkd3d.h` API of
-  `vkd3d/viogpu3d_vkd3d.def`, or the three `vk_icd` entry points; every view imports system DLLs only (no
-  `vulkan-1.dll`, `d3d11.dll`, `dxgi.dll`, libc++ or winpthread; vkd3d-proton's `dxgi.dll` aside), and no view of a
-  Direct3D driver imports a `D3DKMT*` function; the file version of all six DLLs is `DriverVer`'s; the notices file
-  has the full text of every third-party licence below, and names vkd3d-proton's commit and where its source is.
+  the fork's `libs/vkd3d-proton/vkd3d-proton.def`, or the three `vk_icd` entry points; every view imports system DLLs
+  only (no `vulkan-1.dll`, `d3d11.dll`, `dxgi.dll`, libc++ or winpthread), and no view of a Direct3D driver or of a
+  vkd3d-proton DLL imports a `D3DKMT*` function; the file version of all six DLLs is `DriverVer`'s; the notices file
+  has the full text of every third-party licence below, says vkd3d-proton is a modified one, and names the fork, its
+  commit and where its source is.
 
 ## Unproven, and not done
 
@@ -255,7 +269,8 @@ Tools/build-macos.sh --d3d-umd --venus-icd <aarch64 Mesa build>/src/virtio/vulka
   over KosmicKrisp (with texel buffer views at any texel offset, which vkd3d-proton requires: OSMates' KosmicKrisp
   from osmates/mesa `fa3c7b57` on); the feature level it reaches (11_1 is predicted); that the queue gate keeps app
   fences and presents GPU-true; DWM composing Direct3D 12 back buffers through their companions; the cache folder
-  rule; the vkd3d-proton DLL loading in ARM64, x64 and x86 processes.
+  rule; the vkd3d-proton DLL loading in ARM64, x64 and x86 processes; that the fork's build without D3DKMT changes
+  nothing an app sees through the runtime (no call of the runtime's reaches the parts it built out).
 - Direct3D 12 gaps known now: app waits on CPU-signalled fences are kernel packets the driver never sees (Triton has
   the same gap); opened shared resources (`OpenHeapAndResource`) are refused, as in Triton; a Direct3D 12 primary
   scans out source 0.
@@ -276,11 +291,13 @@ Tools/build-macos.sh --d3d-umd --venus-icd <aarch64 Mesa build>/src/virtio/vulka
   `LICENSE`.
 - `dxvk/subprojects/dxbc-spirv/`, linked into the DLLs with DXVK: MIT, Philip Rebohle, its `LICENSE`.
 - `vkd3d-proton/`, in `viogpu3d_vkd3d.dll` and `viogpu3d_vkd3d_x86.dll`: LGPL-2.1, the vkd3d-proton project authors,
-  its `LICENSE` and `COPYING`, unmodified, as DLLs of their own. Linked into them: dxil-spirv (MIT, Hans-Kristian
-  Arntzen for Valve), dxbc-spirv (MIT, Philip Rebohle), and the files of vkd3d-proton and dxil-spirv that state
-  another licence (MIT, BSD, public domain, Apache-2.0 or MIT), which the package build reads from ninja's dependency
-  records of the two builds and quotes as each file states it. The notices name the vkd3d-proton commit and where
-  its source is: this tree's submodule and build script, offered from the same place as the package.
+  its `LICENSE` and `COPYING`, as DLLs of their own. It is a modified library (LGPL-2.1 section 2): the notices say
+  so, and list the fork's commits on top of `v3.1` with their dates and the files they change. Linked into them:
+  dxil-spirv (MIT, Hans-Kristian Arntzen for Valve), dxbc-spirv (MIT, Philip Rebohle), and the files of vkd3d-proton
+  and dxil-spirv that state another licence (MIT, BSD, public domain, Apache-2.0 or MIT), which the package build
+  reads from ninja's dependency records of the two builds and quotes as each file states it. The notices name the
+  fork, its commit and where its source is: the fork at that commit, with this tree's version resource and build
+  script, offered from the same place as the package.
 - Mesa's Venus ICD in the package: mostly MIT, with some files under Apache-2.0, BSL-1.0, SGI-B-2.0, BSD and the
   DirectX-Headers licence. The package build reads which from the Mesa files the three builds compiled (ninja's
   dependency records): each file's SPDX identifier, else the licence its text states, else its subproject's licence
