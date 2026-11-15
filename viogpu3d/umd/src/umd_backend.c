@@ -21,10 +21,14 @@ C_ASSERT(UMD_FEATURE_LEVEL_10_0 == D3D_FEATURE_LEVEL_10_0);
 C_ASSERT(UMD_FEATURE_LEVEL_10_1 == D3D_FEATURE_LEVEL_10_1);
 C_ASSERT(UMD_FEATURE_LEVEL_11_0 == D3D_FEATURE_LEVEL_11_0);
 C_ASSERT(UMD_FEATURE_LEVEL_11_1 == D3D_FEATURE_LEVEL_11_1);
+C_ASSERT(UMD_FEATURE_LEVEL_12_0 == D3D_FEATURE_LEVEL_12_0);
+C_ASSERT(UMD_FEATURE_LEVEL_12_1 == D3D_FEATURE_LEVEL_12_1);
 C_ASSERT(UMD_PIPELINE_LEVEL_10_0 == D3D11DDI_3DPIPELINELEVEL_10_0);
 C_ASSERT(UMD_PIPELINE_LEVEL_10_1 == D3D11DDI_3DPIPELINELEVEL_10_1);
 C_ASSERT(UMD_PIPELINE_LEVEL_11_0 == D3D11DDI_3DPIPELINELEVEL_11_0);
 C_ASSERT(UMD_PIPELINE_LEVEL_11_1 == D3D11_1DDI_3DPIPELINELEVEL_11_1);
+C_ASSERT(UMD_PIPELINE_LEVEL_12_0 == D3DWDDM2_0DDI_3DPIPELINELEVEL_12_0);
+C_ASSERT(UMD_PIPELINE_LEVEL_12_1 == D3DWDDM2_0DDI_3DPIPELINELEVEL_12_1);
 C_ASSERT(UMD_DXGI_FORMAT_R10G10B10A2_TYPELESS == DXGI_FORMAT_R10G10B10A2_TYPELESS);
 C_ASSERT(UMD_DXGI_FORMAT_R10G10B10A2_UNORM == DXGI_FORMAT_R10G10B10A2_UNORM);
 C_ASSERT(UMD_DXGI_FORMAT_R8G8B8A8_TYPELESS == DXGI_FORMAT_R8G8B8A8_TYPELESS);
@@ -104,7 +108,7 @@ void triton_backend_adapter_probe(PTRITON_ADAPTER pAdapter, struct triton_adapte
     out->host_ok = out->viogpu;
     // viogpu3d is a WDDM 2.0 driver: dxgkrnl checks each higher DDI's features against it.
     out->wddm2_0_only = TRUE;
-    // DXVK's own tiled resources tier, which Triton forwards.
+    // DXVK's own feature level and tiled resources tier, which Triton forwards.
     out->caps_flags = TRITON_HOSTCAP_HOST_FEATURE_LEVEL;
 }
 
@@ -203,7 +207,7 @@ HRESULT triton_backend_create_caps_device(PTRITON_ADAPTER pAdapter,
                                           BOOL *pAdoptable)
 {
     struct umd_adapter *adapter = (struct umd_adapter *)pAdapter->pBackend;
-    D3D_FEATURE_LEVEL levels[4];
+    D3D_FEATURE_LEVEL levels[UMD_FEATURE_LEVELS];
     UINT count;
     HRESULT hr;
 
@@ -215,7 +219,7 @@ HRESULT triton_backend_create_caps_device(PTRITON_ADAPTER pAdapter,
     {
         return E_INVALIDARG;
     }
-    count = umd_feature_levels_upto((UINT)maxLevel, (UINT *)levels, 4);
+    count = umd_feature_levels_upto((UINT)maxLevel, (UINT *)levels, UMD_FEATURE_LEVELS);
     if (count == 0)
     {
         return E_INVALIDARG;

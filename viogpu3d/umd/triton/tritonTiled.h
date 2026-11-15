@@ -9,9 +9,13 @@
 #define TRITON_TILED_H_INCLUDED
 
 // D3D_FEATURE_LEVEL values; tritonDDI.c and tritonDDI12.c check them against d3dcommon.h.
-#define TRITON_TILED_LEVEL_11_0 0xb000u
-#define TRITON_TILED_LEVEL_11_1 0xb100u
-#define TRITON_TILED_LEVEL_12_0 0xc000u
+#define TRITON_LEVEL_10_0 0xa000u
+#define TRITON_LEVEL_10_1 0xa100u
+#define TRITON_LEVEL_11_0 0xb000u
+#define TRITON_LEVEL_11_1 0xb100u
+#define TRITON_LEVEL_12_0 0xc000u
+#define TRITON_LEVEL_12_1 0xc100u
+#define TRITON_LEVEL_12_2 0xc200u
 
 // The DDIs stop at tier 3; a host's tier 4 includes it.
 #define TRITON_TILED_TIER_MAX 3u
@@ -26,7 +30,7 @@ static inline unsigned tritonTiledTier12(unsigned hostTier, unsigned featureLeve
 {
     if (!hostFeatureLevel)
     {
-        return featureLevel >= TRITON_TILED_LEVEL_12_0 ? 2u : 0u;
+        return featureLevel >= TRITON_LEVEL_12_0 ? 2u : 0u;
     }
     return tritonTiledClamp(hostTier);
 }
@@ -36,11 +40,11 @@ static inline unsigned tritonTiledFlags11(unsigned hostTier, unsigned featureLev
 {
     unsigned tier = hostFeatureLevel ? tritonTiledClamp(hostTier) : 0u;
 
-    if (featureLevel < TRITON_TILED_LEVEL_11_0)
+    if (featureLevel < TRITON_LEVEL_11_0)
     {
         tier = 0u;
     }
-    else if (featureLevel < TRITON_TILED_LEVEL_11_1 && tier > 1u)
+    else if (featureLevel < TRITON_LEVEL_11_1 && tier > 1u)
     {
         tier = 1u;
     }

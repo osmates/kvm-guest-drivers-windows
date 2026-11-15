@@ -16,7 +16,7 @@
 #include "tritonDxgi.h"
 #include "tritonPresent.h"
 #include "tritonHostCaps.h"
-#include "tritonTiled.h"
+#include "tritonLevel.h"
 
 
 /* Forward declarations of handlers implemented in other translation
@@ -812,18 +812,14 @@ static HRESULT APIENTRY tritonCreateDevice(D3D10DDI_HADAPTER hAdapter,
     p->pUMCallbacks   = pArgs->p11UMCallbacks;
 
     /* The runtime encodes the requested pipeline level in pArgs->Flags
-     * (per D3D11DDICAPS_3DPIPELINESUPPORT). Accept the full 10.0..11.1
-     * range advertised by GetCaps; the host creates a device clamped to
+     * (per D3D11DDICAPS_3DPIPELINESUPPORT). Accept the full 10.0..12.1
+     * range GetCaps can advertise; the host creates a device clamped to
      * the requested feature level. */
     const D3D11DDI_3DPIPELINELEVEL level =
         D3D11DDI_EXTRACT_3DPIPELINELEVEL_FROM_FLAGS(pArgs->Flags);
-    D3D_FEATURE_LEVEL requested;
-    switch (level) {
-    case D3D11DDI_3DPIPELINELEVEL_10_0:    requested = D3D_FEATURE_LEVEL_10_0; break;
-    case D3D11DDI_3DPIPELINELEVEL_10_1:    requested = D3D_FEATURE_LEVEL_10_1; break;
-    case D3D11DDI_3DPIPELINELEVEL_11_0:    requested = D3D_FEATURE_LEVEL_11_0; break;
-    case D3D11_1DDI_3DPIPELINELEVEL_11_1:  requested = D3D_FEATURE_LEVEL_11_1; break;
-    default:
+    const D3D_FEATURE_LEVEL requested =
+        (D3D_FEATURE_LEVEL)tritonLevelFromPipeline11((unsigned)level);
+    if (!requested) {
         TR_LOG("CreateDevice: pipeline level %d unsupported (Triton requires >= 10.0; Flags=0x%08x)",
                level, pArgs->Flags);
         return E_FAIL;
@@ -944,6 +940,12 @@ static HRESULT APIENTRY tritonCloseAdapter(D3D10DDI_HADAPTER hAdapter)
     return S_OK;
 }
 
+// The WDDM 2.0 DDI, which the 12_x pipeline levels are values of.
+static BOOL tritonOffersWddm2_0(const struct triton_adapter_probe *probe)
+{
+    return probe->viogpu && !probe->no_wddm2_ddi && probe->wddm2 && probe->host_ok;
+}
+
 /* Capability-driven DDI version ladder.  The ceiling depends on state
  * only a kernel probe can see -- the KMD's WDDM mode and the host capset
  * -- and GetSupportedVersions runs before any device (and therefore any
@@ -981,7 +983,7 @@ static UINT32 tritonSelectVersions(PTRITON_ADAPTER pAdapter, UINT64 *pVersions)
     if (!probe.viogpu || probe.no_wddm2_ddi)
         return n;
     pVersions[n++] = D3DWDDM1_3_DDI_SUPPORTED;
-    if (probe.wddm2 && probe.host_ok) {
+    if (tritonOffersWddm2_0(&probe)) {
         pVersions[n++] = D3DWDDM2_0_DDI_SUPPORTED;
         if (!probe.wddm2_0_only) {
             pVersions[n++] = D3DWDDM2_1_DDI_SUPPORTED;
@@ -1054,9 +1056,19 @@ static const struct triton_host_caps11 *tritonHostCaps(PTRITON_ADAPTER pAdapter)
     return pAdapter->pHostCaps11 ? pAdapter->pHostCaps11 : &kNone;
 }
 
-C_ASSERT(TRITON_TILED_LEVEL_11_0 == D3D_FEATURE_LEVEL_11_0);
-C_ASSERT(TRITON_TILED_LEVEL_11_1 == D3D_FEATURE_LEVEL_11_1);
-C_ASSERT(TRITON_TILED_LEVEL_12_0 == D3D_FEATURE_LEVEL_12_0);
+C_ASSERT(TRITON_LEVEL_10_0 == D3D_FEATURE_LEVEL_10_0);
+C_ASSERT(TRITON_LEVEL_10_1 == D3D_FEATURE_LEVEL_10_1);
+C_ASSERT(TRITON_LEVEL_11_0 == D3D_FEATURE_LEVEL_11_0);
+C_ASSERT(TRITON_LEVEL_11_1 == D3D_FEATURE_LEVEL_11_1);
+C_ASSERT(TRITON_LEVEL_12_0 == D3D_FEATURE_LEVEL_12_0);
+C_ASSERT(TRITON_LEVEL_12_1 == D3D_FEATURE_LEVEL_12_1);
+C_ASSERT(TRITON_PIPELINE11_10_0 == D3D11DDI_3DPIPELINELEVEL_10_0);
+C_ASSERT(TRITON_PIPELINE11_10_1 == D3D11DDI_3DPIPELINELEVEL_10_1);
+C_ASSERT(TRITON_PIPELINE11_11_0 == D3D11DDI_3DPIPELINELEVEL_11_0);
+C_ASSERT(TRITON_PIPELINE11_11_1 == D3D11_1DDI_3DPIPELINELEVEL_11_1);
+C_ASSERT(TRITON_PIPELINE11_12_0 == D3DWDDM2_0DDI_3DPIPELINELEVEL_12_0);
+C_ASSERT(TRITON_PIPELINE11_12_1 == D3DWDDM2_0DDI_3DPIPELINELEVEL_12_1);
+C_ASSERT(TRITON_CONSERVATIVE_TIER_MAX == D3DWDDM2_0DDI_CONSERVATIVE_RASTERIZATION_TIER_3);
 C_ASSERT((1u << TRITON_TILED_TIER_MAX) - 1 ==
          (D3DWDDM1_3DDI_TILED_RESOURCES_TIER_1_SUPPORTED |
           D3DWDDM1_3DDI_TILED_RESOURCES_TIER_2_SUPPORTED |
@@ -1193,19 +1205,28 @@ static HRESULT APIENTRY tritonGetCaps(D3D10DDI_HADAPTER hAdapter,
          * must also report 10.1/10.0. Advertising 11.x alone is an invalid
          * mask and the runtime rejects the adapter (falling back to WARP).
          * The range runs from 10.0 to the level the host device came up
-         * at, capped at 11.1: the 12_x pipeline levels are D3D12's. */
-        UINT hostFL = (UINT)hc->featureLevel;
+         * at, held where the caps reported here do not back it
+         * (tritonLevel.h). */
+        struct triton_adapter_probe probe;
+        struct triton_level_caps inner;
+        triton_backend_adapter_probe(pAdapter, &probe);
+        memset(&inner, 0, sizeof(inner));
+        if (hc->probed)
+            inner.level = (unsigned)hc->featureLevel;
+        if (HC11(OPTIONS2)) {
+            inner.tiledTier = (unsigned)hc->options2.TiledResourcesTier;
+            inner.typedUavLoads = hc->options2.TypedUAVLoadAdditionalFormats != 0;
+            inner.conservativeTier = (unsigned)hc->options2.ConservativeRasterizationTier;
+            inner.rovs = hc->options2.ROVsSupported != 0;
+        }
         UINT top = 0;
-        TRITON_CAP_HOST("d3d11", "3DPIPELINESUPPORT.HighestFeatureLevel", top,
-                        hc->probed,
-                        hostFL > (UINT)D3D_FEATURE_LEVEL_11_1 ? (UINT)D3D_FEATURE_LEVEL_11_1 : hostFL);
-        pCaps->Caps = D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11DDI_3DPIPELINELEVEL_10_0);
-        if (top >= (UINT)D3D_FEATURE_LEVEL_10_1)
-            pCaps->Caps |= D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11DDI_3DPIPELINELEVEL_10_1);
-        if (top >= (UINT)D3D_FEATURE_LEVEL_11_0)
-            pCaps->Caps |= D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11DDI_3DPIPELINELEVEL_11_0);
-        if (top >= (UINT)D3D_FEATURE_LEVEL_11_1)
-            pCaps->Caps |= D3D11DDI_ENCODE_3DPIPELINESUPPORT_CAP(D3D11_1DDI_3DPIPELINELEVEL_11_1);
+        TRITON_CAP_FIXED("d3d11", "3DPIPELINESUPPORT.HighestFeatureLevel", top,
+                         hc->probed, hc->featureLevel,
+                         tritonLevel11(&inner,
+                                       (probe.caps_flags & TRITON_HOSTCAP_HOST_FEATURE_LEVEL) != 0,
+                                       tritonOffersWddm2_0(&probe)),
+                         "the host's level, at most 12_1 and what the caps back");
+        pCaps->Caps = tritonPipelineCaps11(top);
         break;
     }
     case D3DWDDM1_3DDICAPS_D3D11_OPTIONS1: {

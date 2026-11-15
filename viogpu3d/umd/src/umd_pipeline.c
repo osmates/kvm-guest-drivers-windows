@@ -5,7 +5,9 @@
 
 #include "umd_pipeline.h"
 
-static const UINT umd_levels[] = {
+static const UINT umd_levels[UMD_FEATURE_LEVELS] = {
+                                                                                                    UMD_FEATURE_LEVEL_12_1,
+                                                                                                    UMD_FEATURE_LEVEL_12_0,
                                                                                                     UMD_FEATURE_LEVEL_11_1,
                                                                                                     UMD_FEATURE_LEVEL_11_0,
                                                                                                     UMD_FEATURE_LEVEL_10_1,
@@ -24,6 +26,10 @@ UINT umd_feature_level_from_pipeline(UINT pipelineLevel)
             return UMD_FEATURE_LEVEL_11_0;
         case UMD_PIPELINE_LEVEL_11_1:
             return UMD_FEATURE_LEVEL_11_1;
+        case UMD_PIPELINE_LEVEL_12_0:
+            return UMD_FEATURE_LEVEL_12_0;
+        case UMD_PIPELINE_LEVEL_12_1:
+            return UMD_FEATURE_LEVEL_12_1;
     }
     return 0;
 }
@@ -32,7 +38,7 @@ UINT umd_feature_levels_upto(UINT maxLevel, UINT *levels, UINT capacity)
 {
     UINT count = 0;
 
-    for (UINT i = 0; i < sizeof(umd_levels) / sizeof(umd_levels[0]) && count < capacity; i++)
+    for (UINT i = 0; i < UMD_FEATURE_LEVELS && count < capacity; i++)
     {
         if (umd_levels[i] <= maxLevel)
         {

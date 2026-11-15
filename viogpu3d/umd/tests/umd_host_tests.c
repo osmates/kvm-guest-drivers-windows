@@ -13,7 +13,7 @@
 #include "umd_shared.h"
 #include "umd_vk_chain.h"
 
-#include "../triton/tritonTiled.h"
+#include "../triton/tritonLevel.h"
 
 #include <pthread.h>
 #include <sched.h>
@@ -111,25 +111,46 @@ static void pipelineLevelsMapToFeatureLevels(void)
     CHECK(umd_feature_level_from_pipeline(UMD_PIPELINE_LEVEL_10_1) == UMD_FEATURE_LEVEL_10_1);
     CHECK(umd_feature_level_from_pipeline(UMD_PIPELINE_LEVEL_11_0) == UMD_FEATURE_LEVEL_11_0);
     CHECK(umd_feature_level_from_pipeline(UMD_PIPELINE_LEVEL_11_1) == UMD_FEATURE_LEVEL_11_1);
-    // 9_x and 12_x pipeline levels come from other DDIs.
-    CHECK(umd_feature_level_from_pipeline(4) == 0);
+    CHECK(umd_feature_level_from_pipeline(UMD_PIPELINE_LEVEL_12_0) == UMD_FEATURE_LEVEL_12_0);
+    CHECK(umd_feature_level_from_pipeline(UMD_PIPELINE_LEVEL_12_1) == UMD_FEATURE_LEVEL_12_1);
+    // 9_x pipeline levels come from the D3D9 DDI.
+    for (UINT level = 4; level <= 6; level++)
+    {
+        CHECK(umd_feature_level_from_pipeline(level) == 0);
+    }
+    CHECK(umd_feature_level_from_pipeline(9) == 0);
     CHECK(umd_feature_level_from_pipeline(0xFFFFFFFFu) == 0);
+}
+
+// The driver refuses a device when Triton and the runtime name different levels.
+static void tritonAndTheDriverReadPipelineLevelsAlike(void)
+{
+    for (unsigned level = 0; level < 16; level++)
+    {
+        CHECK(tritonLevelFromPipeline11(level) == umd_feature_level_from_pipeline(level));
+    }
 }
 
 static void featureLevelListsRunHighestFirst(void)
 {
-    UINT levels[4];
+    UINT levels[UMD_FEATURE_LEVELS];
 
-    CHECK(umd_feature_levels_upto(UMD_FEATURE_LEVEL_11_1, levels, 4) == 4);
+    CHECK(umd_feature_levels_upto(UMD_FEATURE_LEVEL_12_1, levels, UMD_FEATURE_LEVELS) == 6);
+    CHECK(levels[0] == UMD_FEATURE_LEVEL_12_1 && levels[1] == UMD_FEATURE_LEVEL_12_0 &&
+          levels[2] == UMD_FEATURE_LEVEL_11_1 && levels[5] == UMD_FEATURE_LEVEL_10_0);
+    CHECK(umd_feature_levels_upto(UMD_FEATURE_LEVEL_12_0, levels, UMD_FEATURE_LEVELS) == 5);
+    CHECK(levels[0] == UMD_FEATURE_LEVEL_12_0 && levels[4] == UMD_FEATURE_LEVEL_10_0);
+    CHECK(umd_feature_levels_upto(UMD_FEATURE_LEVEL_11_1, levels, UMD_FEATURE_LEVELS) == 4);
     CHECK(levels[0] == UMD_FEATURE_LEVEL_11_1 && levels[3] == UMD_FEATURE_LEVEL_10_0);
-    CHECK(umd_feature_levels_upto(UMD_FEATURE_LEVEL_11_0, levels, 4) == 3);
+    CHECK(umd_feature_levels_upto(UMD_FEATURE_LEVEL_11_0, levels, UMD_FEATURE_LEVELS) == 3);
     CHECK(levels[0] == UMD_FEATURE_LEVEL_11_0 && levels[2] == UMD_FEATURE_LEVEL_10_0);
-    CHECK(umd_feature_levels_upto(UMD_FEATURE_LEVEL_10_0, levels, 4) == 1);
-    CHECK(umd_feature_levels_upto(0x9300u, levels, 4) == 0);
-    // 12_0 asks for nothing this driver cannot make.
-    CHECK(umd_feature_levels_upto(0xc000u, levels, 4) == 4);
-    CHECK(umd_feature_levels_upto(UMD_FEATURE_LEVEL_11_1, levels, 2) == 2);
-    CHECK(levels[1] == UMD_FEATURE_LEVEL_11_0);
+    CHECK(umd_feature_levels_upto(UMD_FEATURE_LEVEL_10_0, levels, UMD_FEATURE_LEVELS) == 1);
+    CHECK(umd_feature_levels_upto(0x9300u, levels, UMD_FEATURE_LEVELS) == 0);
+    // 12_2 asks for nothing this driver cannot make.
+    CHECK(umd_feature_levels_upto(0xc200u, levels, UMD_FEATURE_LEVELS) == 6);
+    CHECK(levels[0] == UMD_FEATURE_LEVEL_12_1);
+    CHECK(umd_feature_levels_upto(UMD_FEATURE_LEVEL_12_1, levels, 2) == 2);
+    CHECK(levels[1] == UMD_FEATURE_LEVEL_12_0);
 }
 
 static void sharedFormatsDropSrgbAndTypeless(void)
@@ -1199,6 +1220,223 @@ static void d3d11TiledFlagsAreTheHostsTierWithTheHostLevel(void)
     CHECK(tritonTiledFlags11(1, 0xa100u, 1) == 0);
 }
 
+// The caps vkd3d-proton and DXVK report beside each level.
+static const unsigned innerLevels[4] = {TRITON_LEVEL_11_0, TRITON_LEVEL_11_1, TRITON_LEVEL_12_0, TRITON_LEVEL_12_1};
+
+static struct triton_level_caps innerCaps(unsigned level, unsigned tier)
+{
+    struct triton_level_caps caps;
+
+    memset(&caps, 0, sizeof(caps));
+    caps.level = level;
+    caps.tiledTier = tier;
+    caps.resourceBindingTier = 3;
+    caps.typedUavLoads = 1;
+    caps.conservativeTier = level >= TRITON_LEVEL_12_1 ? 1u : 0u;
+    caps.rovs = level >= TRITON_LEVEL_12_1 ? 1u : 0u;
+    return caps;
+}
+
+static void d3d12LevelIsTheInnerDevicesWithTheHostLevel(void)
+{
+    // Indexes into innerLevels: a 12_x device below tiled tier 2 is held at 11_1, as the runtime checks the tier.
+    static const unsigned want[4][4] = {{0, 0, 0, 0}, {1, 1, 1, 1}, {1, 1, 2, 2}, {1, 1, 3, 3}};
+    static const unsigned pipeline[4] = {TRITON_PIPELINE12_11_0,
+                                         TRITON_PIPELINE12_11_1,
+                                         TRITON_PIPELINE12_12_0,
+                                         TRITON_PIPELINE12_12_1};
+
+    for (unsigned level = 0; level < 4; level++)
+    {
+        for (unsigned tier = 0; tier < 4; tier++)
+        {
+            struct triton_level_caps caps = innerCaps(innerLevels[level], tier);
+            struct triton_level12 out = tritonLevel12(&caps, 1, 1);
+
+            CHECK(out.level == innerLevels[want[level][tier]]);
+            CHECK(out.tiledTier == tier);
+            CHECK(out.conservativeTier == caps.conservativeTier);
+            CHECK(tritonPipeline12(out.level, 0) == pipeline[want[level][tier]]);
+            CHECK(tritonPipeline12(out.level, TRITON_PIPELINE12_12_2) == pipeline[want[level][tier]]);
+            // Without DXIL too: the host's level does not hang on it.
+            CHECK(tritonLevel12(&caps, 1, 0).level == innerLevels[want[level][tier]]);
+        }
+    }
+}
+
+static void d3d12LevelIsTheLabelWithoutTheHostLevel(void)
+{
+    for (unsigned level = 0; level < 4; level++)
+    {
+        for (unsigned tier = 0; tier < 4; tier++)
+        {
+            struct triton_level_caps caps = innerCaps(innerLevels[level], tier);
+            struct triton_level12 dxil = tritonLevel12(&caps, 0, 1);
+            struct triton_level12 label = tritonLevel12(&caps, 0, 0);
+            const int fl12_1 = innerLevels[level] >= TRITON_LEVEL_12_1;
+
+            CHECK(dxil.level == TRITON_LEVEL_12_1);
+            CHECK(dxil.tiledTier == 2);
+            CHECK(dxil.conservativeTier == 1);
+            CHECK(label.level == (fl12_1 ? TRITON_LEVEL_12_1 : TRITON_LEVEL_12_0));
+            CHECK(label.tiledTier == 2);
+            CHECK(label.conservativeTier == (fl12_1 ? 1u : 0u));
+        }
+    }
+    {
+        struct triton_level_caps caps = innerCaps(TRITON_LEVEL_12_0, 3);
+        struct triton_level12 out;
+
+        caps.resourceBindingTier = 1;
+        out = tritonLevel12(&caps, 0, 0);
+        CHECK(out.level == TRITON_LEVEL_11_1);
+        CHECK(out.tiledTier == 0);
+        CHECK(out.conservativeTier == 0);
+    }
+}
+
+static void d3d12LevelIsHeldWhereTheCapsDoNotBackIt(void)
+{
+    struct triton_level_caps caps;
+    struct triton_level12 out;
+
+    // 12_2 needs raytracing, variable rate shading and sampler feedback, which Triton stubs.
+    caps = innerCaps(TRITON_LEVEL_12_2, 3);
+    caps.conservativeTier = 3;
+    out = tritonLevel12(&caps, 1, 1);
+    CHECK(out.level == TRITON_LEVEL_12_1);
+    CHECK(out.tiledTier == 3);
+    CHECK(out.conservativeTier == 3);
+
+    caps = innerCaps(TRITON_LEVEL_12_1, 2);
+    caps.rovs = 0;
+    CHECK(tritonLevel12(&caps, 1, 1).level == TRITON_LEVEL_12_0);
+    caps = innerCaps(TRITON_LEVEL_12_1, 2);
+    caps.conservativeTier = 0;
+    CHECK(tritonLevel12(&caps, 1, 1).level == TRITON_LEVEL_12_0);
+
+    caps = innerCaps(TRITON_LEVEL_12_0, 2);
+    caps.typedUavLoads = 0;
+    CHECK(tritonLevel12(&caps, 1, 1).level == TRITON_LEVEL_11_1);
+    caps = innerCaps(TRITON_LEVEL_12_0, 2);
+    caps.resourceBindingTier = 1;
+    CHECK(tritonLevel12(&caps, 1, 1).level == TRITON_LEVEL_11_1);
+
+    // vkd3d-proton's tier 4 includes 3; conservative rasterization stops at 3 in the DDI.
+    caps = innerCaps(TRITON_LEVEL_12_0, 4);
+    caps.conservativeTier = 5;
+    out = tritonLevel12(&caps, 1, 1);
+    CHECK(out.level == TRITON_LEVEL_12_0);
+    CHECK(out.tiledTier == 3);
+    CHECK(out.conservativeTier == 3);
+
+    // FEATURE_LEVELS unanswered, or below what Direct3D 12 takes.
+    CHECK(tritonLevel12(&(struct triton_level_caps){0}, 1, 1).level == TRITON_LEVEL_11_0);
+    caps = innerCaps(TRITON_LEVEL_10_1, 0);
+    CHECK(tritonLevel12(&caps, 1, 1).level == TRITON_LEVEL_11_0);
+
+    // vkd3d-proton on KosmicKrisp, before and after shader residency and strict unmapped reads.
+    caps = innerCaps(TRITON_LEVEL_11_1, 1);
+    CHECK(tritonLevel12(&caps, 1, 1).level == TRITON_LEVEL_11_1);
+    caps = innerCaps(TRITON_LEVEL_12_0, 2);
+    out = tritonLevel12(&caps, 1, 1);
+    CHECK(out.level == TRITON_LEVEL_12_0 && out.tiledTier == 2 && out.conservativeTier == 0);
+}
+
+static void d3d12PipelineLevelStaysUnderTheRuntimes(void)
+{
+    CHECK(tritonPipeline12(TRITON_LEVEL_12_0, 0) == TRITON_PIPELINE12_12_0);
+    CHECK(tritonPipeline12(TRITON_LEVEL_12_1, TRITON_PIPELINE12_12_2) == TRITON_PIPELINE12_12_1);
+    CHECK(tritonPipeline12(TRITON_LEVEL_12_2, TRITON_PIPELINE12_12_2) == TRITON_PIPELINE12_12_2);
+    // 3DPIPELINESUPPORT stops at 12_1, and 3DPIPELINESUPPORT1 at the runtime's highest.
+    CHECK(tritonPipeline12(TRITON_LEVEL_12_2, TRITON_PIPELINE12_12_1) == TRITON_PIPELINE12_12_1);
+    CHECK(tritonPipeline12(TRITON_LEVEL_12_1, TRITON_PIPELINE12_12_0) == TRITON_PIPELINE12_12_0);
+    CHECK(tritonPipeline12(TRITON_LEVEL_12_0, TRITON_PIPELINE12_12_1) == TRITON_PIPELINE12_12_0);
+    CHECK(tritonPipeline12(TRITON_LEVEL_11_1, 0) == TRITON_PIPELINE12_11_1);
+    CHECK(tritonPipeline12(TRITON_LEVEL_11_0, 0) == TRITON_PIPELINE12_11_0);
+    CHECK(tritonPipeline12(0, 0) == TRITON_PIPELINE12_11_0);
+    // A runtime answer below 11_0 (the 1_0 core levels) is no ceiling.
+    CHECK(tritonPipeline12(TRITON_LEVEL_12_1, 2) == TRITON_PIPELINE12_12_1);
+}
+
+static void d3d11LevelIsTheInnerDevicesWithTheHostLevel(void)
+{
+    // Indexes into innerLevels, and the pipeline levels each reports.
+    static const unsigned want[4][4] = {{0, 0, 0, 0}, {1, 1, 1, 1}, {1, 1, 2, 2}, {1, 1, 3, 3}};
+    static const unsigned caps11[4] = {0x7, 0xf, 0x8f, 0x18f};
+
+    for (unsigned level = 0; level < 4; level++)
+    {
+        for (unsigned tier = 0; tier < 4; tier++)
+        {
+            struct triton_level_caps caps = innerCaps(innerLevels[level], tier);
+            const unsigned out = tritonLevel11(&caps, 1, 1);
+
+            CHECK(out == innerLevels[want[level][tier]]);
+            CHECK(tritonPipelineCaps11(out) == caps11[want[level][tier]]);
+        }
+    }
+    // DXVK on KosmicKrisp: tier 1 and 11_1, then tier 2 and 12_0 (no conservative rasterization or ROVs).
+    {
+        struct triton_level_caps caps = innerCaps(TRITON_LEVEL_12_0, 2);
+        CHECK(tritonLevel11(&caps, 1, 1) == TRITON_LEVEL_12_0);
+    }
+}
+
+static void d3d11LevelStopsAt11_1WithoutTheHostLevel(void)
+{
+    for (unsigned level = 0; level < 4; level++)
+    {
+        for (unsigned tier = 0; tier < 4; tier++)
+        {
+            struct triton_level_caps caps = innerCaps(innerLevels[level], tier);
+            const unsigned want = innerLevels[level] < TRITON_LEVEL_11_1 ? innerLevels[level] : TRITON_LEVEL_11_1;
+
+            // No tier is reported without the flag, and 12_0 needs tier 2.
+            CHECK(tritonLevel11(&caps, 0, 1) == want);
+            // The 12_x pipeline levels are values of the WDDM 2.0 DDI.
+            CHECK(tritonLevel11(&caps, 1, 0) == want);
+        }
+    }
+}
+
+static void d3d11LevelIsHeldWhereTheCapsDoNotBackIt(void)
+{
+    struct triton_level_caps caps;
+
+    caps = innerCaps(TRITON_LEVEL_12_1, 3);
+    caps.rovs = 0;
+    CHECK(tritonLevel11(&caps, 1, 1) == TRITON_LEVEL_12_0);
+    caps = innerCaps(TRITON_LEVEL_12_1, 3);
+    caps.conservativeTier = 0;
+    CHECK(tritonLevel11(&caps, 1, 1) == TRITON_LEVEL_12_0);
+    caps = innerCaps(TRITON_LEVEL_12_0, 3);
+    caps.typedUavLoads = 0;
+    CHECK(tritonLevel11(&caps, 1, 1) == TRITON_LEVEL_11_1);
+    // The Direct3D 11 DDI has no 12_2.
+    caps = innerCaps(TRITON_LEVEL_12_2, 3);
+    CHECK(tritonLevel11(&caps, 1, 1) == TRITON_LEVEL_12_1);
+    caps = innerCaps(TRITON_LEVEL_10_1, 0);
+    CHECK(tritonLevel11(&caps, 1, 1) == TRITON_LEVEL_10_1);
+    // No caps device: 10_0 alone, as before.
+    CHECK(tritonLevel11(&(struct triton_level_caps){0}, 1, 1) == 0);
+}
+
+static void d3d11PipelineCapsHaveNoGap(void)
+{
+    CHECK(tritonPipelineCaps11(0) == 0x1);
+    CHECK(tritonPipelineCaps11(TRITON_LEVEL_10_0) == 0x1);
+    CHECK(tritonPipelineCaps11(TRITON_LEVEL_10_1) == 0x3);
+    CHECK(tritonPipelineCaps11(TRITON_LEVEL_11_0) == 0x7);
+    CHECK(tritonPipelineCaps11(TRITON_LEVEL_11_1) == 0xf);
+    // 12_0 and 12_1 are pipeline levels 7 and 8; 4 to 6 are the 9_x levels of the D3D9 DDI.
+    CHECK(tritonPipelineCaps11(TRITON_LEVEL_12_0) == 0x8f);
+    CHECK(tritonPipelineCaps11(TRITON_LEVEL_12_1) == 0x18f);
+    CHECK(tritonLevelFromPipeline11(TRITON_PIPELINE11_12_0) == TRITON_LEVEL_12_0);
+    CHECK(tritonLevelFromPipeline11(TRITON_PIPELINE11_12_1) == TRITON_LEVEL_12_1);
+    CHECK(tritonLevelFromPipeline11(4) == 0);
+}
+
 int main(void)
 {
     adapterWithVenusIsTaken();
@@ -1206,6 +1444,7 @@ int main(void)
     adapterTextsNameEveryOutcome();
     adapterLuidSplitsAsTheKernelDriverPacksIt();
     pipelineLevelsMapToFeatureLevels();
+    tritonAndTheDriverReadPipelineLevelsAlike();
     featureLevelListsRunHighestFirst();
     sharedFormatsDropSrgbAndTypeless();
     scanoutFormatsAreTheOnesVenusDescribes();
@@ -1244,6 +1483,14 @@ int main(void)
     d3d12TiledTierIsTheHostsWithTheHostLevel();
     d3d11TiledFlagsAreNoneWithoutTheHostLevel();
     d3d11TiledFlagsAreTheHostsTierWithTheHostLevel();
+    d3d12LevelIsTheInnerDevicesWithTheHostLevel();
+    d3d12LevelIsTheLabelWithoutTheHostLevel();
+    d3d12LevelIsHeldWhereTheCapsDoNotBackIt();
+    d3d12PipelineLevelStaysUnderTheRuntimes();
+    d3d11LevelIsTheInnerDevicesWithTheHostLevel();
+    d3d11LevelStopsAt11_1WithoutTheHostLevel();
+    d3d11LevelIsHeldWhereTheCapsDoNotBackIt();
+    d3d11PipelineCapsHaveNoGap();
 
     printf("umd host tests: %d checks, %d failed\n", checks, failures);
     return failures == 0 ? 0 : 1;

@@ -144,25 +144,6 @@ tritonHostCaps12Snapshot(struct triton_host_caps12 *s,
     return TRUE;
 }
 
-UINT
-tritonHostCaps12PipelineLevel(const struct triton_host_caps12 *hc)
-{
-    if (!(hc->have & TRITON_HC12_FEATURE_LEVELS))
-        return (UINT)D3D12DDI_3DPIPELINELEVEL_11_0;
-    switch (hc->maxFeatureLevel) {
-    case D3D_FEATURE_LEVEL_12_2:
-        return (UINT)D3D12DDI_3DPIPELINELEVEL_12_2;
-    case D3D_FEATURE_LEVEL_12_1:
-        return (UINT)D3D12DDI_3DPIPELINELEVEL_12_1;
-    case D3D_FEATURE_LEVEL_12_0:
-        return (UINT)D3D12DDI_3DPIPELINELEVEL_12_0;
-    case D3D_FEATURE_LEVEL_11_1:
-        return (UINT)D3D12DDI_3DPIPELINELEVEL_11_1;
-    default:
-        return (UINT)D3D12DDI_3DPIPELINELEVEL_11_0;
-    }
-}
-
 /* ---------- D3D11 ---------- */
 
 BOOL
@@ -182,7 +163,7 @@ tritonHostCaps11Snapshot(struct triton_host_caps11 *s, PTRITON_ADAPTER pAdapter,
     ID3D11DeviceContext *ctx = NULL;
     D3D_FEATURE_LEVEL fl = (D3D_FEATURE_LEVEL)0;
     HRESULT hr = triton_backend_create_caps_device(
-        pAdapter, D3D_FEATURE_LEVEL_11_1, &dev, &fl, &ctx, pAdoptable);
+        pAdapter, D3D_FEATURE_LEVEL_12_1, &dev, &fl, &ctx, pAdoptable);
     if (FAILED(hr) || !dev || !ctx) {
         TR_LOG("caps[d3d11]: inner device create failed 0x%08lx; "
                "reporting zero fill", (unsigned long)hr);

@@ -111,10 +111,6 @@ BOOL tritonHostCaps12Snapshot(struct triton_host_caps12 *out,
                               struct TRITON12_ADAPTER *pAdapter,
                               ID3D12Device **ppDev, BOOL *pAdoptable);
 
-/* The D3D12DDI_3DPIPELINELEVEL of the host device's highest feature
- * level, 11_0 when FEATURE_LEVELS went unanswered. */
-UINT tritonHostCaps12PipelineLevel(const struct triton_host_caps12 *hc);
-
 /* ---------- D3D11 ---------- */
 
 enum {
@@ -149,7 +145,7 @@ struct triton_host_caps11 {
 };
 
 /* D3D11 twin: the inner device is created at the highest feature level
- * the host grants (10_0..11_1 offered) and returned with its immediate
+ * the host grants (10_0..12_1 offered) and returned with its immediate
  * context for the first CreateDevice to adopt. */
 // The device comes from triton_backend_create_caps_device; *pAdoptable is its answer.
 struct TRITON_ADAPTER;

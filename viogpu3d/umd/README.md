@@ -64,14 +64,29 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
   `ID3D11Device2`, which back tile pools with Vulkan sparse binding through Venus. The backend sets
   `TRITON_HOSTCAP_HOST_FEATURE_LEVEL`, so `D3D11_OPTIONS1` reports DXVK's own tier and each format DXVK's `TILED`
   bit (`triton/tritonTiled.h`). On OSMates' KosmicKrisp (osmates/mesa `81f3ba31`, sparse binding and residency for
-  buffers and 2D images, not residency in shaders or strict reads of unmapped tiles) that is tier 1.
+  buffers and 2D images, not residency in shaders or strict reads of unmapped tiles) that is tier 1; with residency
+  in shaders and strict reads of unmapped tiles it is tier 2.
+- Feature level: `GetCaps` reports the level of DXVK's own device, which it makes at the highest level DXVK takes, up
+  to 12_1, the last the Direct3D 11 DDI has (its 12_0 and 12_1 pipeline levels are values of the WDDM 2.0 DDI, which
+  the driver offers). The level is held where the caps the driver reports do not back it (`triton/tritonLevel.h`):
+  12_0 needs tiled resources tier 2 and the typed UAV loads, 12_1 also conservative rasterization and ROVs. Every DDI
+  those need forwards to DXVK: the tile DDIs, min/max samplers, conservative rasterization in the WDDM 2.0 rasterizer
+  state, and the shaders' residency feedback and ROV declarations, which reach DXVK in the shader's own tokens.
+  `CreateDevice` takes all six levels from 10_0 to 12_1. On KosmicKrisp with residency in shaders and strict reads
+  of unmapped tiles, DXVK reaches 12_0: no conservative rasterization or ROVs.
 
 ## How Direct3D 12 works
 
 - `OpenAdapter12` takes the adapter with the same check as `OpenAdapter10_2`. Triton's D3D12 layer answers the caps
   from a vkd3d-proton device it makes once per adapter in `GetCaps`, on a Venus instance through `D3DKMT` (no runtime
-  device exists yet) that it then releases. The pipeline level is that device's own highest feature level; nothing
-  is claimed for a label. DDI `_0082` with DXIL: vkd3d-proton takes DXIL through dxil-spirv.
+  device exists yet) that it then releases. DDI `_0082` with DXIL: vkd3d-proton takes DXIL through dxil-spirv.
+- Feature level: the pipeline level is that device's own highest feature level, with nothing claimed for a label,
+  and every cap the runtime checks at that level is vkd3d-proton's: resource binding tier, tiled resources tier, typed
+  UAV loads, conservative rasterization and ROVs, and the shader models up to 6.6 (6.7 and later need cap types of a
+  newer DDI). The level is held where those caps do not back it (`triton/tritonLevel.h`), and at 12_1 at most: 12_2
+  needs raytracing, variable rate shading and sampler feedback, whose DDIs Triton leaves as stubs. The answer to
+  `3DPIPELINESUPPORT1` is no higher than the runtime's own highest, and `3DPIPELINESUPPORT`'s stops at 12_1, as the
+  feature level 12_2 specification asks. Nothing else holds it: the kernel driver reports no level.
 - The first `GetCaps` or `CreateDevice` of a Direct3D 12 process loads `viogpu3d_vkd3d.dll` beside this DLL by path,
   and the driver calls the `vkd3d.h` API by `GetProcAddress`. vkd3d-proton makes its Vulkan instance through this
   driver's `vkGetInstanceProcAddr`, whose `vkCreateInstance` puts `VkD3DDDICallbacksMESA` in front of the create
@@ -104,7 +119,8 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
   vkd3d-proton loads, to `%LOCALAPPDATA%\viogpu3d\vkd3d-proton`, or to `0` (no disk cache) when that folder cannot
   be made: vkd3d-proton would otherwise write into the app's current folder.
 - Tiled resources: `OPTIONS.TiledResourcesTier` is vkd3d-proton's own, at most tier 3 (`triton/tritonTiled.h`): tier 1
-  on KosmicKrisp at `81f3ba31`, with feature level 11_1. Reserved textures and buffers are vkd3d-proton's reserved
+  on KosmicKrisp at `81f3ba31`, with feature level 11_1; tier 2 and feature level 12_0 with residency in shaders and
+  strict reads of unmapped tiles. Reserved textures and buffers are vkd3d-proton's reserved
   resources; `UpdateTileMappings`, `CopyTileMappings` and `CopyTiles` go to them, `GetMipPacking` asks vkd3d-proton's
   `GetResourceTiling`, each format carries vkd3d-proton's `TILED` bit, and each mapping change is ordered as a batch
   is: after the other queues' earlier batches, before the app's later fences.
@@ -193,7 +209,10 @@ Tools/build-macos.sh --d3d-umd --venus-icd <aarch64 Mesa build>/src/virtio/vulka
   allocation count's bounds, the handles copied back; `umd_vk.c` asserts the mirrored structs against the kits'
   headers), the vkd3d-proton cache folder rule and the vkd3d-proton DLL beside each driver. For both: the tiled
   resources tier Triton reports (`triton/tritonTiled.h`), for host tiers 0 to 3 at the 11_0, 11_1 and 12_0 labels,
-  with and without `TRITON_HOSTCAP_HOST_FEATURE_LEVEL`. Built and run twice: with ASan and UBSan, and with TSan.
+  with and without `TRITON_HOSTCAP_HOST_FEATURE_LEVEL`; the feature level each reports (`triton/tritonLevel.h`), for
+  inner levels 11_0 to 12_1 and tiers 0 to 3, with and without the flag, with the caps that hold it lower, 12_2 held
+  at 12_1, the runtime's highest, the Direct3D 11 pipeline bits, and that Triton and the driver read the 12_0 and
+  12_1 pipeline levels alike. Built and run twice: with ASan and UBSan, and with TSan.
 - `tests/check-package.sh <Install/Win11/ARM64 or Install/Win10/ARM64>`, with `MESA_SRC` the Mesa tree of the Venus
   builds and `MINGW_DIR` the llvm-mingw the DLLs were linked with: the INF and the package list the same files; the
   INF copies both Direct3D drivers, both vkd3d-proton DLLs, both Vulkan drivers, their manifests and the notices into
@@ -244,6 +263,9 @@ Tools/build-macos.sh --d3d-umd --venus-icd <aarch64 Mesa build>/src/virtio/vulka
   combined depth and stencil on KosmicKrisp), that the Direct3D 12 runtime sends a reserved buffer with no heap and
   no placement, as the driver takes it, and that Venus on Windows binds tiles of the memory DXVK and vkd3d-proton
   allocate. Tier 1 leaves reads of unmapped tiles undefined; on KosmicKrisp they read zero.
+- Feature level 12_0, both APIs: that the runtimes take it from these caps (Microsoft documents what each level
+  needs, not what the runtimes check), that the Direct3D 11 runtime takes 12_0 from a WDDM 2.0 DDI and creates its
+  devices there, and residency feedback and strict reads of unmapped tiles through Venus on KosmicKrisp.
 
 ## Licences
 

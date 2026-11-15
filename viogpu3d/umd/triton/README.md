@@ -30,17 +30,29 @@ which name what Triton needs from the stack below it.
 - `tritonTiled.h` is new: the tiled resources tier both layers report, without platform headers, so the driver's host
   tests build it. With `TRITON_HOSTCAP_HOST_FEATURE_LEVEL` it is the inner device's tier, at most tier 3 (the DDIs'
   ceiling; every tiled DDI forwards to the inner device); without it, Triton's own answers stay: none for Direct3D 11,
-  and for Direct3D 12 tier 2 at a 12_x label, none below.
+  and for Direct3D 12 tier 2 at a 12_x label, none below. It also holds the `D3D_FEATURE_LEVEL` values
+  (`TRITON_LEVEL_*`) both new headers use.
+- `tritonLevel.h` is new: the feature level both layers report and the caps behind it, without platform headers, for
+  the same tests. With `TRITON_HOSTCAP_HOST_FEATURE_LEVEL` it is the inner device's level, held where what Triton
+  reports does not back it: 12_0 needs tiled tier 2 and the typed UAV loads (and, for Direct3D 12, resource binding
+  tier 2), 12_1 conservative rasterization and ROVs. Direct3D 12 stops at 12_1, as raytracing, variable rate shading
+  and sampler feedback are stubs; Direct3D 11 at 12_1, its DDI's last, whose 12_x values need the WDDM 2.0 DDI. Without
+  the flag, Triton's own labels stay.
 - `tritonDDI.c`: the device comes from `triton_backend_create_device` and goes with `triton_backend_destroy_device`,
   also after a failed create; the version ladder and the tile-based caps read `triton_backend_adapter_probe`;
   `OpenAdapter10_2` is `tritonOpenAdapter10_2`, not exported, and keeps the backend's adapter; CloseAdapter calls
   `triton_backend_close_adapter`; a caps device the backend calls not adoptable is released after the snapshot.
 - `tritonHostCaps.c`: the D3D11 snapshot takes its device from `triton_backend_create_caps_device`, the D3D12 one
-  from `triton12_backend_create_caps_device`, which says whether the device may be adopted. The D3D12 snapshot also
-  asks `FEATURE_LEVELS` and logs the answer, and `tritonHostCaps12PipelineLevel` turns it into a pipeline level. The
-  header comment no longer says the device is Neptune's.
+  from `triton12_backend_create_caps_device`, which says whether the device may be adopted. The D3D11 snapshot asks
+  for levels up to 12_1, where Triton asked up to 11_1. The D3D12 snapshot also asks `FEATURE_LEVELS` and logs the
+  answer. The header comment no longer says the device is Neptune's.
 - `tritonHostCaps.h`: `tritonHostCaps11Snapshot` takes the adapter (`pAdapter`, with a forward declaration of
-  `struct TRITON_ADAPTER`) and says whether the device may be adopted (`pAdoptable`).
+  `struct TRITON_ADAPTER`) and says whether the device may be adopted (`pAdoptable`); its comment names the levels up
+  to 12_1.
+- `tritonDDI.c`, the feature level: `3DPIPELINESUPPORT` reports the inner device's level up to 12_1
+  (`tritonLevel11`), where Triton stopped at 11_1 on the reading that the 12_x pipeline levels are D3D12's (the D3D11
+  DDI has them as WDDM 2.0 values); `CreateDevice` takes the 12_0 and 12_1 pipeline levels (`tritonLevelFromPipeline11`);
+  the WDDM 2.0 test of the version ladder is `tritonOffersWddm2_0`, which both use.
 - `tritonQuery.c`: no `tritonSharedBridge.h` include.
 - `tritonResource.c`: shared, primary and companion textures come from `triton_backend_create_shared_texture`, which
   also gives their kernel allocation and makes a primary's storage linear (`TRITON_D3D11_MISC_LINEAR_EXPORT` stays
@@ -72,16 +84,18 @@ The D3D12 layer:
   the backend calls it not adoptable; the host caps come from `triton12_backend_host_caps`; `OpenAdapter12` is
   `tritonOpenAdapter12`, not exported, and keeps the backend's adapter; CloseAdapter calls
   `triton12_backend_close_adapter`. With the new `TRITON_HOSTCAP_HOST_FEATURE_LEVEL`, the pipeline level is the inner
-  device's own highest feature level, conservative rasterization is not claimed for the FL 12_1 label, and
+  device's own highest feature level, held where the caps do not back it and at 12_1 at most (`tritonLevel.h`),
+  conservative rasterization is the inner device's tier, not claimed for the FL 12_1 label, and
   `OPTIONS.TiledResourcesTier` is the inner device's (`tritonTiled.h`), where Triton reported none at an 11_x label;
-  `CheckFormatSupport` then passes the inner device's per-format `TILED` bit on. The pipeline level is worked out in
-  `t12PipelineLevel`, out of `GetCaps`. Whether
+  `CheckFormatSupport` then passes the inner device's per-format `TILED` bit on. Level and tiers are worked out in
+  `t12Level`, out of `GetCaps`. `3DPIPELINESUPPORT1` answers no higher than the runtime's highest and
+  `3DPIPELINESUPPORT` no higher than 12_1, as the feature level 12_2 specification asks. Whether
   textures on CPU-visible heaps are row major comes from `triton12_backend_host_takes_row_major_texture`; the
   `EXECUTECOMMANDLISTS_PARALLELISM` answer's note names the queue gate, not Neptune's ring.
 - `tritonHostCaps.h`, the D3D12 part: the new `TRITON_HC12_FEATURE_LEVELS` bit and `maxFeatureLevel` field;
   `tritonHostCaps12Snapshot` takes the adapter (`pAdapter`, with a forward declaration of `struct TRITON12_ADAPTER`)
-  and says whether the device may be adopted (`pAdoptable`); the new `tritonHostCaps12PipelineLevel`. The header
-  comment names the backends' caps device in place of Neptune's.
+  and says whether the device may be adopted (`pAdoptable`). The header comment names the backends' caps device in
+  place of Neptune's.
 - `tritonDescriptor12.c`: the header comment only, which named Neptune's device and its override file.
 - `tritonQueue12.c`: the gate after `ExecuteCommandLists` signals the drain fence as before and then calls
   `triton12_backend_gate_queue`, in place of Neptune's gate arm and its kernel driver's gate packet; the backend's

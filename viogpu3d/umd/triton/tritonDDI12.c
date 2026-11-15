@@ -14,7 +14,7 @@
 #include "triton12.h"
 #include "triton_log.h"
 #include "tritonHostCaps.h"
-#include "tritonTiled.h"
+#include "tritonLevel.h"
 #include "triton12_tables.h"
 #include "triton12_stubs.h"
 
@@ -250,66 +250,54 @@ triton12CpuVisibleTextures(PTRITON12_ADAPTER pAdapter)
 #define CAP12_TODO(name, lv, bit, hv, v, why) \
     TRITON_CAP_TODO("d3d12", name, lv, HC12(bit), hv, v, why)
 
-C_ASSERT(TRITON_TILED_LEVEL_11_0 == D3D_FEATURE_LEVEL_11_0);
-C_ASSERT(TRITON_TILED_LEVEL_11_1 == D3D_FEATURE_LEVEL_11_1);
-C_ASSERT(TRITON_TILED_LEVEL_12_0 == D3D_FEATURE_LEVEL_12_0);
+C_ASSERT(TRITON_LEVEL_11_0 == D3D_FEATURE_LEVEL_11_0);
+C_ASSERT(TRITON_LEVEL_11_1 == D3D_FEATURE_LEVEL_11_1);
+C_ASSERT(TRITON_LEVEL_12_0 == D3D_FEATURE_LEVEL_12_0);
+C_ASSERT(TRITON_LEVEL_12_1 == D3D_FEATURE_LEVEL_12_1);
+C_ASSERT(TRITON_LEVEL_12_2 == D3D_FEATURE_LEVEL_12_2);
+C_ASSERT(TRITON_PIPELINE12_11_0 == D3D12DDI_3DPIPELINELEVEL_11_0);
+C_ASSERT(TRITON_PIPELINE12_11_1 == D3D12DDI_3DPIPELINELEVEL_11_1);
+C_ASSERT(TRITON_PIPELINE12_12_0 == D3D12DDI_3DPIPELINELEVEL_12_0);
+C_ASSERT(TRITON_PIPELINE12_12_1 == D3D12DDI_3DPIPELINELEVEL_12_1);
+C_ASSERT(TRITON_PIPELINE12_12_2 == D3D12DDI_3DPIPELINELEVEL_12_2);
 C_ASSERT(TRITON_TILED_TIER_MAX == D3D12DDI_TILED_RESOURCES_TIER_3);
+C_ASSERT(TRITON_CONSERVATIVE_TIER_MAX == D3D12DDI_CONSERVATIVE_RASTERIZATION_TIER_3);
 
-/* Pipeline level.  FL 12_1 when the host takes DXIL: the label is
- * what apps check before they start, and ValidateCapsForFeatureLevel
- * requires TiledResourcesTier >= 2, TypedUAVLoadAdditionalFormats and
- * ConservativeRasterizationTier >= 1 behind it -- see D3D12_OPTIONS
- * for which of those are host-backed and which are label-only.  With
- * TRITON_HOSTCAP_HOST_FEATURE_LEVEL the level is the inner device's
- * own highest one instead, and nothing is claimed for a label.
+/* The level, tiled tier and conservative rasterization tier, worked out
+ * in tritonLevel.h.  Without TRITON_HOSTCAP_HOST_FEATURE_LEVEL, FL 12_1
+ * when the host takes DXIL: the label is what apps check before they
+ * start, and ValidateCapsForFeatureLevel requires TiledResourcesTier >= 2,
+ * TypedUAVLoadAdditionalFormats and ConservativeRasterizationTier >= 1
+ * behind it -- see D3D12_OPTIONS for which of those are host-backed and
+ * which are label-only.  Without DXIL the label follows what the host
+ * backs.  The shader model is not part of the runtime's FL 12 gate, so
+ * SM 5.1 alone carries either label.  Apps refuse to start below their
+ * level, and the runtime answers them DXGI_ERROR_UNSUPPORTED from this
+ * cap alone, before CreateDevice.
  *
- * Without DXIL the label follows what the host backs: 12_0 needs
- * resource binding tier 2 and the typed-UAV-load formats (tiled tier
- * 2 is shim-covered, see D3D12_OPTIONS); 12_1 adds conservative
- * rasterization tier 1 and ROVs.  The shader model is not part of
- * the runtime's FL 12 gate, so SM 5.1 alone carries either label.
- * Apps refuse to start below their level, and the runtime answers
- * them DXGI_ERROR_UNSUPPORTED from this cap alone, before
- * CreateDevice. */
-static UINT
-t12PipelineLevel(UINT32 hostCaps, const struct triton_host_caps12 *hc)
-{
-    const BOOL fl12_0 = HC12(OPTIONS) &&
-                        hc->options.ResourceBindingTier >= 2 /* TIER_2 */ &&
-                        hc->options.TypedUAVLoadAdditionalFormats;
-    const BOOL fl12_1 = fl12_0 &&
-                        hc->options.ConservativeRasterizationTier >= 1 &&
-                        hc->options.ROVsSupported;
-    if (hostCaps & TRITON_HOSTCAP_HOST_FEATURE_LEVEL)
-        return tritonHostCaps12PipelineLevel(hc);
-    return ((hostCaps & TRITON_HOSTCAP_DXIL) || fl12_1)
-               ? (UINT)D3D12DDI_3DPIPELINELEVEL_12_1
-           : fl12_0 ? (UINT)D3D12DDI_3DPIPELINELEVEL_12_0
-                    : (UINT)D3D12DDI_3DPIPELINELEVEL_11_1;
-}
-
-static UINT
-t12PipelineFeatureLevel(UINT pipelineLevel)
-{
-    switch (pipelineLevel) {
-    case D3D12DDI_3DPIPELINELEVEL_12_2: return D3D_FEATURE_LEVEL_12_2;
-    case D3D12DDI_3DPIPELINELEVEL_12_1: return D3D_FEATURE_LEVEL_12_1;
-    case D3D12DDI_3DPIPELINELEVEL_12_0: return D3D_FEATURE_LEVEL_12_0;
-    case D3D12DDI_3DPIPELINELEVEL_11_1: return D3D_FEATURE_LEVEL_11_1;
-    default:                            return D3D_FEATURE_LEVEL_11_0;
-    }
-}
-
-// OPTIONS.TiledResourcesTier, which CheckFormatSupport's TILED bit follows.
-static UINT
-t12TiledTier(PTRITON12_ADAPTER pAdapter)
+ * With TRITON_HOSTCAP_HOST_FEATURE_LEVEL the level is the inner device's
+ * own highest one, at most 12_1, and every cap the runtime checks at it
+ * is the inner device's. */
+static struct triton_level12
+t12Level(PTRITON12_ADAPTER pAdapter)
 {
     const struct triton_host_caps12 *hc = triton12HostCaps(pAdapter);
     const UINT32 hostCaps = pAdapter ? pAdapter->HostCaps : 0;
-    return tritonTiledTier12(
-        HC12(OPTIONS) ? (unsigned)hc->options.TiledResourcesTier : 0u,
-        t12PipelineFeatureLevel(t12PipelineLevel(hostCaps, hc)),
-        (hostCaps & TRITON_HOSTCAP_HOST_FEATURE_LEVEL) != 0);
+    struct triton_level_caps inner;
+
+    memset(&inner, 0, sizeof(inner));
+    if (HC12(FEATURE_LEVELS))
+        inner.level = (unsigned)hc->maxFeatureLevel;
+    if (HC12(OPTIONS)) {
+        inner.tiledTier = (unsigned)hc->options.TiledResourcesTier;
+        inner.resourceBindingTier = (unsigned)hc->options.ResourceBindingTier;
+        inner.typedUavLoads = hc->options.TypedUAVLoadAdditionalFormats != 0;
+        inner.conservativeTier = (unsigned)hc->options.ConservativeRasterizationTier;
+        inner.rovs = hc->options.ROVsSupported != 0;
+    }
+    return tritonLevel12(&inner,
+                         (hostCaps & TRITON_HOSTCAP_HOST_FEATURE_LEVEL) != 0,
+                         (hostCaps & TRITON_HOSTCAP_DXIL) != 0);
 }
 
 static HRESULT APIENTRY
@@ -324,19 +312,28 @@ triton12GetCaps(D3D12DDI_HADAPTER hAdapter, const D3D12DDIARG_GETCAPS *pArgs)
 
     const struct triton_host_caps12 *hc = triton12HostCaps(pAdapter);
     const BOOL hostLevel = (hostCaps & TRITON_HOSTCAP_HOST_FEATURE_LEVEL) != 0;
-    const UINT pipelineLevel = t12PipelineLevel(hostCaps, hc);
+    const struct triton_level12 level = t12Level(pAdapter);
 
     if ((int)pArgs->Type == D3D12DDICAPS_TYPE_0081_3DPIPELINESUPPORT1) {
         /* In/out struct, exempt from the zero-fill default: field 0 is
          * the runtime's input (HighestRuntimeSupportedFeatureLevel) and
-         * field 1 our answer, where zero reads as "no pipeline". */
+         * field 1 our answer, where zero reads as "no pipeline".  The
+         * answer may not exceed the runtime's (DirectX-Specs, feature
+         * level 12_2). */
         if (pArgs->DataSize >= 2 * sizeof(UINT)) {
             UINT *pLevels = (UINT *)pArgs->pData;
+            const UINT pipelineLevel = tritonPipeline12(level.level, pLevels[0]);
             TR_LOG("12.GetCaps 3DPIPELINESUPPORT1: runtime highest=%u", pLevels[0]);
-            CAP12_FIXED("3DPIPELINESUPPORT1.Level", pLevels[1],
-                        SHADER_MODEL, hc->shaderModel.HighestShaderModel,
-                        pipelineLevel,
-                        "FL label from the host DXIL capset bit; host value is its shader model");
+            if (hostLevel)
+                CAP12_FIXED("3DPIPELINESUPPORT1.Level", pLevels[1],
+                            FEATURE_LEVELS, tritonPipeline12(hc->maxFeatureLevel, 0),
+                            pipelineLevel,
+                            "the host's level, at most 12_1 and what the caps back, at most the runtime's");
+            else
+                CAP12_FIXED("3DPIPELINESUPPORT1.Level", pLevels[1],
+                            SHADER_MODEL, hc->shaderModel.HighestShaderModel,
+                            pipelineLevel,
+                            "FL label from the host DXIL capset bit; host value is its shader model");
         }
         return S_OK;
     }
@@ -397,9 +394,10 @@ triton12GetCaps(D3D12DDI_HADAPTER hAdapter, const D3D12DDIARG_GETCAPS *pArgs)
     switch ((int)pArgs->Type) {
     case D3D12DDICAPS_TYPE_3DPIPELINESUPPORT: {
         /* "For D3D12, drivers only report the maximum level they
-         * support" (d3d12umddi.h).  Same gate as 3DPIPELINESUPPORT1. */
+         * support" (d3d12umddi.h).  Same gate as 3DPIPELINESUPPORT1;
+         * this selector's answers stop at 12_1. */
         *(D3D12DDI_3DPIPELINELEVEL *)pArgs->pData =
-            (D3D12DDI_3DPIPELINELEVEL)pipelineLevel;
+            (D3D12DDI_3DPIPELINELEVEL)tritonPipeline12(level.level, TRITON_PIPELINE12_12_1);
         break;
     }
     case D3D12DDICAPS_TYPE_GPUVA_CAPS: {
@@ -472,13 +470,15 @@ triton12GetCaps(D3D12DDI_HADAPTER hAdapter, const D3D12DDIARG_GETCAPS *pArgs)
                     D3D12DDI_CROSS_NODE_SHARING_TIER_NOT_SUPPORTED,
                     "single node");
         const D3D12DDI_TILED_RESOURCES_TIER tiledTier =
-            (D3D12DDI_TILED_RESOURCES_TIER)t12TiledTier(pAdapter);
+            (D3D12DDI_TILED_RESOURCES_TIER)level.tiledTier;
+        const D3D12DDI_CONSERVATIVE_RASTERIZATION_TIER conservativeTier =
+            (D3D12DDI_CONSERVATIVE_RASTERIZATION_TIER)level.conservativeTier;
         if (hostLevel) {
             // Every tiled DDI forwards to the inner device: tritonResource12.c, tritonQueue12.c, tritonList12.c.
             CAP12_FIXED("OPTIONS.TiledResourcesTier", pCaps->TiledResourcesTier,
                         OPTIONS, hc->options.TiledResourcesTier, tiledTier,
                         "the host's tier, forwarded, at most TIER_3");
-        } else if (pipelineLevel >= (UINT)D3D12DDI_3DPIPELINELEVEL_12_0) {
+        } else if (level.level >= TRITON_LEVEL_12_0) {
             /* Tiled tier 2 is an FL 12_0 requirement.  It is backed either
              * by the host's sparse tier (forwarded reserved resources,
              * tritonResource12.c) or by the committed-backing shim
@@ -493,30 +493,33 @@ triton12GetCaps(D3D12DDI_HADAPTER hAdapter, const D3D12DDIARG_GETCAPS *pArgs)
                         OPTIONS, hc->options.TiledResourcesTier, tiledTier,
                         "FL 11_1 label: no tiled claim");
         }
-        if ((hostCaps & TRITON_HOSTCAP_DXIL) && !hostLevel) {
+        if (hostLevel) {
+            // The PSO's mode reaches the inner device (tritonPipeline12.c).
+            CAP12_FIXED("OPTIONS.ConservativeRasterizationTier",
+                        pCaps->ConservativeRasterizationTier, OPTIONS,
+                        hc->options.ConservativeRasterizationTier, conservativeTier,
+                        "the host's tier, at most TIER_3");
+        } else if (hostCaps & TRITON_HOSTCAP_DXIL) {
             /* Tier 1 is claimed for the FL 12_1 label alone, which apps
              * check before they will start.  Metal has no conservative-
              * raster primitive, so a PSO that actually enables it fails
              * at create -- loud and per-PSO, never silent corruption. */
             CAP12_FIXED("OPTIONS.ConservativeRasterizationTier",
                         pCaps->ConservativeRasterizationTier, OPTIONS,
-                        hc->options.ConservativeRasterizationTier,
-                        D3D12DDI_CONSERVATIVE_RASTERIZATION_TIER_1,
+                        hc->options.ConservativeRasterizationTier, conservativeTier,
                         "FL 12_1 label; a PSO enabling it fails at create");
-        } else if (pipelineLevel >= (UINT)D3D12DDI_3DPIPELINELEVEL_12_1) {
+        } else if (level.level >= TRITON_LEVEL_12_1) {
             /* Host-backed (the 12_1 gate checked it), clamped to the
              * DDI enum's ceiling of 3. */
-            const UINT hostTier = hc->options.ConservativeRasterizationTier;
             CAP12_FIXED("OPTIONS.ConservativeRasterizationTier",
                         pCaps->ConservativeRasterizationTier, OPTIONS,
-                        hostTier, hostTier > 3u ? 3u : hostTier,
+                        hc->options.ConservativeRasterizationTier, conservativeTier,
                         "host tier, clamped to the DDI ceiling of 3");
         } else {
             /* Optional below 12_1; not claimed on the no-DXIL label. */
             CAP12_FIXED("OPTIONS.ConservativeRasterizationTier",
                         pCaps->ConservativeRasterizationTier, OPTIONS,
-                        hc->options.ConservativeRasterizationTier,
-                        D3D12DDI_CONSERVATIVE_RASTERIZATION_TIER_NOT_SUPPORTED,
+                        hc->options.ConservativeRasterizationTier, conservativeTier,
                         "FL 12_0/11_1 label: no conservative-raster claim");
         }
         /* Later revisions grow this struct in place (d3d12umddi.h ladder
@@ -1114,7 +1117,7 @@ triton12CheckFormatSupport(D3D12DDI_HDEVICE hDevice, DXGI_FORMAT Format,
         // Only where GetCaps reports the host's tier: the label-only claim has no per-format answer.
         if ((fs.Support2 & D3D12_FORMAT_SUPPORT2_TILED) && p->pAdapter &&
             (p->pAdapter->HostCaps & TRITON_HOSTCAP_HOST_FEATURE_LEVEL) &&
-            t12TiledTier(p->pAdapter) >= 1)
+            t12Level(p->pAdapter).tiledTier >= 1)
             caps |= D3D12DDI_FORMAT_SUPPORT_TILED;
 
         /* Typed depth formats are not shader-sampleable or COLOUR render

@@ -37,8 +37,7 @@ UINT triton_backend_workaround_flags(void);
 #define TRITON_HOSTCAP_MAP_DEFAULT_BUFFERS       (1u << 4)
 #define TRITON_HOSTCAP_SHADER_CACHE              (1u << 5)
 #define TRITON_HOSTCAP_DXIL                      (1u << 6)
-// The D3D12 pipeline level is the inner device's own highest feature level, with no label-only claims, and both
-// layers report the inner device's tiled resources tier (tritonTiled.h).
+// Both layers report the inner device's level, caps and tiled tier, with no label-only claims: tritonLevel.h.
 #define TRITON_HOSTCAP_HOST_FEATURE_LEVEL        (1u << 7)
 
 struct triton_adapter_probe {
