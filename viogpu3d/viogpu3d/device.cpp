@@ -108,6 +108,8 @@ VioGpu3dContext::VioGpu3dContext(VioGpu3dDevice *device, UINT node, DXGK_CREATEC
     m_pDevice = device;
     m_Node = node;
     m_Flags = flags;
+    RtlZeroMemory(&m_RootPageTable, sizeof(m_RootPageTable));
+    m_RootPageTableEntries = 0;
 }
 
 // One command to the device's context. A fenced one holds pDma until the device signals it.

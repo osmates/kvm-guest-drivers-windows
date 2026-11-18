@@ -736,11 +736,22 @@ SIZE_T APIENTRY VioGpu3dGetRootPageTableSize(_In_ CONST HANDLE hAdapter, _Inout_
     return (SIZE_T)pages * PAGE_SIZE;
 }
 
+// VidMm calls this before a context of the process first runs, and again when the root table moves.
 VOID APIENTRY VioGpu3dSetRootPageTable(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETROOTPAGETABLE *pSetPageTable)
 {
     PAGED_CODE();
     UNREFERENCED_PARAMETER(hAdapter);
-    UNREFERENCED_PARAMETER(pSetPageTable);
+    VioGpu3dContext *pContext = reinterpret_cast<VioGpu3dContext *>(pSetPageTable->hContext);
+    DbgPrint(TRACE_LEVEL_INFORMATION,
+             ("root page table: node %u, segment %u, offset 0x%llx, %u entries\n",
+              pContext != NULL ? pContext->GetNode() : 0u,
+              pSetPageTable->Address.SegmentId,
+              pSetPageTable->Address.SegmentOffset,
+              pSetPageTable->NumEntries));
+    if (pContext != NULL)
+    {
+        pContext->SetRootPageTable(pSetPageTable->Address, pSetPageTable->NumEntries);
+    }
 }
 
 VOID APIENTRY VioGpu3dSetStablePowerState(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETSTABLEPOWERSTATE *pArgs)

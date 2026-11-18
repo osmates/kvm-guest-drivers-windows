@@ -337,6 +337,11 @@ class VioGpu3dContext
     {
         return m_Flags.VirtualAddressing;
     }
+    void SetRootPageTable(const D3DGPU_PHYSICAL_ADDRESS &address, UINT entries)
+    {
+        m_RootPageTable = address;
+        m_RootPageTableEntries = entries;
+    }
 
   private:
     NTSTATUS SendCommand(_In_ const VIRTIO_WDDM_COMMAND_HEADER *pHeader,
@@ -347,6 +352,9 @@ class VioGpu3dContext
     VioGpu3dDevice *m_pDevice;
     UINT m_Node;
     DXGK_CREATECONTEXTFLAGS m_Flags;
+    // What a GPU MMU would load for this context; the device reaches memory by resource, so nothing reads it.
+    D3DGPU_PHYSICAL_ADDRESS m_RootPageTable;
+    UINT m_RootPageTableEntries;
 };
 
 // The host-visible region: shared memory region 1, where the host maps blobs, at blob alignment.

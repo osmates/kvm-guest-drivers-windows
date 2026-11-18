@@ -1208,6 +1208,15 @@ NTSTATUS VioGpu3dAdapter::BuildPagingBuffer(_Inout_ DXGKARG_BUILDPAGINGBUFFER *p
                               pUpdate->PageTableLevel));
                     return STATUS_INVALID_PARAMETER;
                 }
+                DbgPrint(TRACE_LEVEL_INFORMATION,
+                         ("page table update: level %u, start %u, %u entries%s, valid %u segment %u page 0x%llx\n",
+                          pUpdate->PageTableLevel,
+                          pUpdate->StartIndex,
+                          pUpdate->NumPageTableEntries,
+                          pUpdate->Flags.Repeat ? " repeated" : "",
+                          (UINT)pUpdate->pPageTableEntries[0].Valid,
+                          (UINT)pUpdate->pPageTableEntries[0].Segment,
+                          pUpdate->pPageTableEntries[0].PageAddress));
                 pDest += pUpdate->StartIndex;
                 if (pUpdate->Flags.Repeat)
                 {
