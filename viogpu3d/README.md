@@ -10,8 +10,8 @@ display-only driver in `viogpu` stays as it is.
 - Run in a Windows 11 guest on OSMates' accelerated GPU (2026-11-18): the driver starts (problem code 0) and dxgkrnl
   reports the adapter as render and display, WDDM 2.0, GpuMmu. Direct3D 11 and 12 devices run on it through DXVK,
   vkd3d-proton and Venus in ARM64, x64 and x86 processes, and a Direct3D 11 draw into a texture reads back right.
-  Presents do not work yet, Direct3D 12 graphics pipelines fail on the host, and the desktop stays on a software
-  display adapter (below, "Not done yet").
+  Presents do not work yet, Direct3D 12 graphics pipelines fail on the host, and the desktop is not on this adapter
+  yet (below, "Not done yet").
 - dxgkrnl fails the adapter after a successful start, code 43, when its software key has no `UserModeDriverName`
   (`Microsoft-Windows-DxgKrnl-Admin` event 549, "Object Name not found", `StartAdapter_AddAdapterFailed`). So the
   package always carries the Direct3D driver, and the build refuses to pack it without the Direct3D driver's DLLs,
@@ -94,20 +94,36 @@ merge request 38731): the same tags and layouts.
 ## Display
 
 - One scanout, at sizes up to 8184 a side and 16,777,216 pixels: a 5K screen's 5120 x 2880 fits.
+- The VidPN: target modes of every listed size at 60 Hz with the active size equal to the total size, only the pinned
+  source's size once a source is pinned, and the other way round; identity and centered scaling (the same thing at
+  equal sizes) and identity rotation, since the scanout shows the source as it is. The rotation support keeps the
+  offset bits dxgkrnl set: clearing them is bug check 0x113, subtype 0x1C. `DxgkDdiIsSupportedVidPn` refuses a path
+  whose pinned source and target differ in size. `DxgkDdiIsSupportedVidPn`, `DxgkDdiEnumVidPnCofuncModality` and
+  `DxgkDdiCommitVidPn` log the paths, pins and mode counts they saw; `DxgkDdiRecommendMonitorModes`,
+  `DxgkDdiUpdateActiveVidPnPresentPath`, `DxgkDdiQueryChildStatus`, `DxgkDdiSetVidPnSourceVisibility` and each new
+  source address log one line.
+- The flip thread reports `DXGK_INTERRUPT_CRTC_VSYNC` every 16 ms while `DxgkDdiControlInterrupt` has it on, and
+  each `DxgkDdiControlInterrupt` call is logged. Not measured yet: whether dxgkrnl turns it on for this adapter.
 - Modes come from `GET_DISPLAY_INFO` and the EDID, read by data block as viogpudo now does.
 - A flip shows a 3D resource with `SET_SCANOUT` or a blob with `SET_SCANOUT_BLOB`. No hardware cursor yet.
 
 ## Not done yet
 
-- Presents: the host refuses the blob of a swapchain's buffers and of every shared surface (`RESOURCE_CREATE_BLOB`,
-  `ERR_UNSPEC`). The Direct3D 12 driver gives every one-level render target such a surface, so a Direct3D 12 render
-  target fails to create too.
-- Direct3D 12 graphics pipelines fail on the host (KosmicKrisp's Metal compiler), so no Direct3D 12 draw runs yet
+- Presents: OSMates' host refused the blob of a swapchain's buffers and of every shared surface
+  (`RESOURCE_CREATE_BLOB`, `ERR_UNSPEC`) until main `d3303957`, which pins virglrenderer `b6e26840`. Presents with
+  that host are not measured yet: they need the desktop on this adapter (below).
+- Direct3D 12 graphics pipelines need a KosmicKrisp that prints `fcanonicalize` in MSL; OSMates' pin does not yet
   (`umd/README.md`).
-- The desktop on this adapter: Windows keeps it on a software display adapter, and `DxgkDdiCommitVidPn` is never
-  called: dxgkrnl asks `DxgkDdiIsSupportedVidPn` and `DxgkDdiEnumVidPnCofuncModality` and stops there, also with a
-  Direct3D 11 device working and the display configuration database made again. Since Direct3D 11 works here,
-  LogonUI renders on this adapter, the screen stays black and nobody can sign in.
+- The desktop on this adapter. Until 2026-11-18 the VidPN the driver gave back was not valid (one 640 x 480 target
+  mode for a 1024 x 768 source, an unset active size, centered scaling), so dxgkrnl asked `DxgkDdiIsSupportedVidPn`
+  and `DxgkDdiEnumVidPnCofuncModality`, never called `DxgkDdiCommitVidPn`, and put the desktop on the Basic Display
+  adapter's no-EDID output, also with a Direct3D 11 device working and with the display configuration database made
+  again; LogonUI, rendering on this adapter, crashed in a loop and the screen stayed black. The VidPN is valid now
+  ("Display" above): the driver supports every VidPN dxgkrnl asks about and Windows records a 1024 x 768
+  configuration for the monitor, but dxgkrnl still calls no `DxgkDdiCommitVidPn` and keeps the desktop on Basic
+  Display, also with the database deleted before the boot. On a second such boot dxgkrnl called no VidPN DDI at all.
+  LogonUI still crashes: its shared render targets fail in DXVK, which shares an image only through
+  `VK_KHR_external_memory_win32`, and Venus on Windows does not offer it (`umd/README.md`).
 - `SupportPerEngineTDR` stays off: with it dxgkrnl refuses to start the adapter.
 - A D3D9 DDI. D3D9 apps get D3D9On12 only when they ask for it themselves, and only once the desktop is on this
   adapter (above): D3D9 and `Direct3DCreate9On12` list only the adapters that drive a display.

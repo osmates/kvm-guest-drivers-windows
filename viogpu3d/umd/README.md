@@ -61,6 +61,9 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
 - Venus escapes through the runtime's `pfnEscapeCb`, which the driver wraps: a blob map whose address does not fit
   this process's pointers is unmapped and fails, so that a 32-bit process never uses the low half of a 64-bit address.
 - The DXGI DDI (present, blt, residency) is Triton's: it presents with `pfnPresentCb` and the kernel allocation above.
+- The driver's lines and DXVK's go to `OutputDebugString`. With `VIOGPU3D_UMD_LOG` naming a folder, each process also
+  appends them to `<folder>\<exe>-<pid>.log`: LogonUI and DWM run in a session no debug-output collector reaches, and
+  a machine-wide variable (`setx /M`, then a restart) reaches them.
 - Tiled resources: Triton forwards the tile DDIs (`UpdateTileMappings`, `CopyTileMappings`, `CopyTiles`,
   `UpdateTiles`, `TiledResourceBarrier`, `ResizeTilePool`, `GetMipPacking`) to DXVK's `ID3D11DeviceContext2` and
   `ID3D11Device2`, which back tile pools with Vulkan sparse binding through Venus. The backend sets
@@ -266,13 +269,22 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
   for Venus's own memory, as `D3DDDICB_ALLOCATE` documents (NULL ties the allocations to the device; only shared
   resources need one), and the driver logs the first such allocation of each process; the `E_INVALIDARG` seen before
   was the kernel driver's failed open.
-- Direct3D 12 graphics pipelines: the triangle's pipeline fails to build on the host (KosmicKrisp's Metal compiler:
-  "Compiler failed to build request"). Venus makes pipelines without waiting for the answer, so the next
-  `vkCmdBindPipeline` names an object the host does not have, the host's decoder stops the context, and the process
-  ends with `vn_ring_submit abort on fatal`. Compute work and copies run.
-- Direct3D 12 presents: `CreateSwapChainForHwnd` fails (`E_OUTOFMEMORY` on the desktop,
-  `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE` in session 0). The host refuses the back buffers' blob (`RESOURCE_CREATE_BLOB`,
-  `ERR_UNSPEC`), so `pfnAllocateCb` with `hResource` set fails with `E_FAIL`.
+- Direct3D 12 graphics pipelines: on OSMates' KosmicKrisp the triangle's pipeline fails to build ("Compiler failed to
+  build request"; the Metal compiler's message is "use of undeclared identifier 'ALU' ... 'fcanonicalize'": the
+  shaders ask for denormal flushing, and KosmicKrisp printed no MSL for `fcanonicalize`). Venus makes pipelines without
+  waiting for the answer, so the next `vkCmdBindPipeline` names an object the host does not have and the process ends
+  with `vn_ring_submit abort on fatal`. With a KosmicKrisp that prints it (`kk: Emit fcanonicalize`, 2026-11-18, not
+  in OSMates' pin yet) the triangle draws into a texture and reads back right.
+- Shared Direct3D 11 textures (LogonUI's render targets, a swapchain's buffers): the driver makes them linear, and
+  OSMates' KosmicKrisp refuses linear images with color attachment usage, so DXVK fails them ("Cannot create
+  texture"); `kk: Allow linear 2D color attachments` (the same day, not in OSMates' pin yet) takes them, and on the
+  host a draw, a blend and a blit into a linear 2D image read back right with it. Then DXVK does not share them: it
+  shares an image only through `VK_KHR_external_memory_win32`, which Venus on Windows does not offer, so no kernel
+  allocation reaches the runtime's resource and another process cannot open it.
+- Direct3D 12 presents, on a host before main `d3303957`: `CreateSwapChainForHwnd` failed (`E_OUTOFMEMORY` on the
+  desktop, `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE` in session 0). That host refused the back buffers' blob
+  (`RESOURCE_CREATE_BLOB`, `ERR_UNSPEC`), so `pfnAllocateCb` with `hResource` set failed with `E_FAIL`. Main
+  `d3303957` pins virglrenderer `b6e26840`, which makes these blobs; presents on it are not measured yet.
 - Direct3D 11: `D3D11CreateDevice` makes a DXVK device on Venus in ARM64, x64 and x86 processes, at feature level
   12_0 when asked for it, and a triangle drawn into a texture 120 times reads back as drawn. Before, DXVK's
   `vkCreateDevice` failed with `VK_ERROR_EXTENSION_NOT_PRESENT`: DXVK's umd extension provider added
@@ -290,17 +302,19 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
 
 ## Unproven, and not done
 
-- Presents, both APIs: the host's blob for swapchain buffers and shared surfaces (`../README.md`), then that DWM
-  composes, and the rest of this list. No Windows 10 guest has had the Win10 package.
-- Direct3D 12 graphics pipelines fail on the host (KosmicKrisp's Metal compiler, above), so no Direct3D 12 draw runs
-  yet. The next measure is the pipeline's SPIR-V (`VKD3D_SHADER_DUMP_PATH`) and the Metal compiler's error.
+- Presents, both APIs: a run on a host with virglrenderer `b6e26840`, which makes the blobs of swapchain buffers and
+  shared surfaces (`../README.md`), once the desktop is on this adapter; then that DWM composes, and the rest of this
+  list. No Windows 10 guest has had the Win10 package.
+- Direct3D 12 draws wait for OSMates' KosmicKrisp pin to have `fcanonicalize` (above).
+- Shared Direct3D 11 textures and primaries: OSMates' KosmicKrisp pin with `kk: Allow linear 2D color attachments`;
+  Venus on Windows exporting image memory as `OPAQUE_WIN32_KMT` through `VK_KHR_external_memory_win32`, or DXVK
+  making a shared image's allocation with `VkD3DDDICreateResourceMESA` without it; the kernel driver's flip of a
+  `HOST3D` primary.
 - Not measured: whether Venus must keep the WSI extensions it implements itself (`VK_KHR_incremental_present`,
   `VK_EXT_hdr_metadata`, the swapchain maintenance ones) from the host when an app enables them without
   `VK_KHR_swapchain`. DXVK did so in session 0 in an earlier run; in later session 0 runs it enabled
   `VK_KHR_swapchain` with them, and the host took `VK_EXT_hdr_metadata` without it from vkd3d-proton. A Mesa change
   for it waits for a session 0 run that shows the device failing without the change and made with it.
-- Shared textures need Venus to export image memory as `OPAQUE_WIN32_KMT`; primaries and shared textures need linear
-  render targets on KosmicKrisp, and the kernel driver's flip of a `HOST3D` primary.
 - Opening another process's shared texture or the kernel driver's surfaces: the host side exists (OSMates with the
   virglrenderer pin that imports Venus memory into another context), but that Windows opens these textures through
   this driver is unproven in a guest. Which of the kernel driver's surfaces Windows opens in a Direct3D process at
@@ -310,7 +324,7 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
   `GetDC`, `AcquireSync`, `ReleaseSync` or `CreateSharedHandle`, it fails with `DXGI_ERROR_UNSUPPORTED`, `E_FAIL` or
   `E_NOTIMPL`, as `OpenSharedResource` and `OpenSharedResource1` already did.
 - No D3D9 DDI.
-- Direct3D 12: a swapchain (the host's blob for its buffers, above); that the queue gate keeps app fences and
+- Direct3D 12: a swapchain on a host that makes its buffers' blobs (above); that the queue gate keeps app fences and
   presents GPU-true; DWM composing Direct3D 12 back buffers through their companions; the cache folder rule; that the
   fork's build without D3DKMT changes nothing an app sees through the runtime (no call of the runtime's reaches the
   parts it built out).
