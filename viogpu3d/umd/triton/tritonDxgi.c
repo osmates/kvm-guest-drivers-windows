@@ -191,17 +191,15 @@ triton_pt_account(double sig, double arm, double wait, BOOL already)
 }
 
 /* Flush the frame; when `arm` is set, also signal the present fence and arm
- * the GPU-completion event (whose transport arm is what submits the KMD's
- * flip-gate token); when `wait` is additionally set, block until the GPU
- * retires the marker before returning.  The flush is unconditional: the DXGI
+ * the GPU-completion event; when `wait` is additionally set, block until the
+ * GPU retires the marker before returning.  The flush is unconditional: the DXGI
  * DDI requires a present to submit all partially built command buffers, and
  * this is the only place the present path submits them.
  *
- * arm=TRUE  wait=FALSE   scanout primaries (pPrimaryDesc resources).  Per
- *   the MMIO-flip contract, ordering render->scanout is enforced KMD-side:
- *   DxgkDdiPresent peeks the newest token as the flip's render dependency
- *   and VioGpuVidPN withholds the scanout -- and the vsync address report
- *   that would retire the flip -- until it retires.  The present thread
+ * arm=TRUE  wait=FALSE   scanout primaries (pPrimaryDesc resources).  The
+ *   backend orders the flip after the frame on the GPU (pFlipGate, which
+ *   tritonPresentSubmitCb hands to triton_backend_flip_wait): the KMD shows
+ *   whatever the flip names once dxgkrnl runs it.  The present thread
  *   never waits for its own frame, only for the run-ahead bound (see
  *   TRITON_PRESENT_MAX_AHEAD); frames-in-flight is otherwise DXGI's job
  *   (it blocks the APPLICATION once MaximumFrameLatency presents are
@@ -230,7 +228,7 @@ tritonGateTraceMs(void)
 }
 
 static void
-tritonPresentFlushAndGate(PTRITON_DEVICE pD, BOOL arm, BOOL wait)
+tritonPresentFlushAndGate(PTRITON_DEVICE pD, BOOL arm, BOOL wait, UINT64 *pFlipGate)
 {
    if (!pD->pCtx1)
       return;
@@ -278,22 +276,7 @@ tritonPresentFlushAndGate(PTRITON_DEVICE pD, BOOL arm, BOOL wait)
       if (done < v) {
          hEvt = tritonPresentPopEvent(pD);
          tritonPresentDrainEvent(hEvt);
-         /* Bounded run-ahead (KMD-gated presents only): nothing else paces
-          * an app whose flips complete under sync-interval-0 frame-drop
-          * semantics -- render DMA fences retire on host-accept, so neither
-          * dxgkrnl nor DXGI ever throttles it.  Unpaced, the app runs
-          * arbitrarily far ahead of GPU execution and every queued flip's
-          * token stays unretired, so the pending-flip queue never holds a
-          * displayable frame.  The caller sleeps until the GPU is within
-          * the pacing depth.
-          *
-          * The pacing wait must NOT use SetEventOnCompletion: every arm on
-          * this fence submits a fresh monotonic flip-gate token, and a
-          * pacing arm fires when an OLDER fence value completes -- a
-          * higher-numbered token retiring early.  The KMD's retired-token
-          * watermark is a max, so one early retire marks every in-flight
-          * frame up to v as done and their flips scan out unrendered
-          * buffers.  The wait below polls GetCompletedValue instead. */
+         /* Scanout primaries: bounded run-ahead (TRITON_PRESENT_MAX_AHEAD). */
          if (!wait) {
             /* Depth = the app's own flip-chain length when known, capped at
              * the DXGI-default frame latency (rationale at the constant). */
@@ -333,6 +316,9 @@ tritonPresentFlushAndGate(PTRITON_DEVICE pD, BOOL arm, BOOL wait)
    } else {
       ID3D11DeviceContext1_Flush(pD->pCtx1);
    }
+   /* The KMD has no flip gate: the backend orders this flip after the frame. */
+   if (pFlipGate && !wait)
+      *pFlipGate = triton_backend_flip_signal(pD, v != 0 && done >= v);
    LeaveCriticalSection(&pD->presentLock);
    pt_arm = TRITON_PT_NOW();
 
@@ -546,12 +532,14 @@ tritonPresentFlushAndGate(PTRITON_DEVICE pD, BOOL arm, BOOL wait)
  * all share pD->hKMContext, and only one thread may drive an HCONTEXT at a
  * time (see kmCtxLock in triton.h). */
 static HRESULT
-tritonPresentSubmitCb(PTRITON_DEVICE pD, DXGIDDICB_PRESENT *cb)
+tritonPresentSubmitCb(PTRITON_DEVICE pD, DXGIDDICB_PRESENT *cb, UINT64 flipGate)
 {
    if (!pD->presentLockInit)
       return pD->pfnPresentCb(pD->hRTDevice.handle, cb);
    const double t0 = TRITON_PT_NOW();
    EnterCriticalSection(&pD->kmCtxLock);
+   if (flipGate)
+      triton_backend_flip_wait(pD, flipGate);
    HRESULT hr = pD->pfnPresentCb(pD->hRTDevice.handle, cb);
    LeaveCriticalSection(&pD->kmCtxLock);
    if (triton_backend_debug(TRITON_DEBUG_PRESENT_TIMING))
@@ -609,8 +597,8 @@ tritonDxgiPresent(DXGI_DDI_ARG_PRESENT *pArgs)
     * would sit in the host D3D command buffer indefinitely and the
     * consumer would composite stale or initial-zero contents.  Flush and
     * arm the GPU-completion fence; scanout primaries return without
-    * waiting for the frame (the KMD gates the flip on the token this arm
-    * submits), composited surfaces block until the GPU finishes (DWM's
+    * waiting for the frame (the flip gate orders it on the GPU), composited
+    * surfaces block until the GPU finishes (DWM's
     * sampling cannot be ordered any other way).  See
     * tritonPresentFlushAndGate. */
    if (src->pPresentCompanion) {
@@ -618,7 +606,9 @@ tritonDxgiPresent(DXGI_DDI_ARG_PRESENT *pArgs)
       tritonResourceSyncPresentCompanion(pD, src);
       tritonPresentUnlock(pD);
    }
-   tritonPresentFlushAndGate(pD, TRUE /* arm */, !src->IsPresentable /* wait */);
+   UINT64 flipGate = 0;
+   tritonPresentFlushAndGate(pD, TRUE /* arm */, !src->IsPresentable /* wait */,
+                             src->IsPresentable ? &flipGate : NULL);
 
    /* DXGIDDICB_PRESENT (MSDN):
     *   hSrcAllocation  the rendered back buffer to present (a flip-primary
@@ -632,7 +622,7 @@ tritonDxgiPresent(DXGI_DDI_ARG_PRESENT *pArgs)
    cb.hDstAllocation = dst ? dst->hKMAllocation : 0;
    cb.pDXGIContext   = pArgs->pDXGIContext;
    cb.hContext       = pD->hKMContext;
-   HRESULT hr = tritonPresentSubmitCb(pD, &cb);
+   HRESULT hr = tritonPresentSubmitCb(pD, &cb, flipGate);
    InterlockedDecrement(&pD->presentInFlight);
    return hr;
 }
@@ -717,7 +707,7 @@ tritonDxgiRotateResourceIdentities(DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *pArg
     * TRITON_PRESENT_MAX_AHEAD in triton.h) -- but only for PRESENTABLE
     * chains.  A device rotates several chains (the runtime also rotates
     * composited windowed chains, and DWM rotates one per output on its one
-    * device); pacing governs only the KMD-gated scanout chain, which is
+    * device); pacing governs only the scanout chain, which is
     * exactly the set whose members carry pPrimaryDesc.  Composited presents
     * take the full GPU wait and never consult this. */
    {
@@ -734,7 +724,7 @@ tritonDxgiRotateResourceIdentities(DXGI_DDI_ARG_ROTATE_RESOURCE_IDENTITIES *pArg
     * backed KM allocation that consumers have imported.  Left-rotate
     * the backing tuples (resource[i] adopts resource[i+1]'s storage;
     * MSDN: "0 <= 1, 1 <= 2, etc."), keeping (host texture, present
-    * companion, allocation, import rig) together so present tokens keep naming the storage
+    * companion, allocation, import rig) together so a present's allocation keeps naming the storage
     * that was actually rendered. */
    {
       PTRITON_RESOURCE r0 = (PTRITON_RESOURCE)(uintptr_t)pArgs->pResources[0];
@@ -1134,7 +1124,7 @@ tritonDxgiBltCommon(DXGI_DDI_HDEVICE hDevice,
                                               (DXGI_FORMAT)dst->Format);
       tritonPresentUnlock(pD);
       if (Flags.Present)
-         tritonPresentFlushAndGate(pD, FALSE /* arm */, FALSE /* wait */);
+         tritonPresentFlushAndGate(pD, FALSE /* arm */, FALSE /* wait */, NULL);
       InterlockedDecrement(&pD->presentInFlight);
       return S_OK;
    }
@@ -1171,7 +1161,7 @@ tritonDxgiBltCommon(DXGI_DDI_HDEVICE hDevice,
                                             src, SrcSubresource, &box);
          if (SUCCEEDED(shr)) {
             if (Flags.Present)
-               tritonPresentFlushAndGate(pD, FALSE /* arm */, FALSE /* wait */);
+               tritonPresentFlushAndGate(pD, FALSE /* arm */, FALSE /* wait */, NULL);
             InterlockedDecrement(&pD->presentInFlight);
             return S_OK;
          }
@@ -1201,7 +1191,7 @@ tritonDxgiBltCommon(DXGI_DDI_HDEVICE hDevice,
    tritonPresentUnlock(pD);
    /* A presentation blt is the present: nothing later submits it. */
    if (Flags.Present)
-      tritonPresentFlushAndGate(pD, FALSE /* arm */, FALSE /* wait */);
+      tritonPresentFlushAndGate(pD, FALSE /* arm */, FALSE /* wait */, NULL);
    InterlockedDecrement(&pD->presentInFlight);
    return S_OK;
 }
@@ -1324,15 +1314,16 @@ tritonDxgiPresent1(DXGI_DDI_ARG_PRESENT1 *pArgs)
       return S_OK;
    }
    /* See tritonDxgiPresent: the frame must be submitted or it never reaches
-    * the shared dmabuf.  Arm always -- the KMD's flip gate is keyed on the
-    * token the arm submits; wait only for composited (non-primary)
-    * surfaces. */
+    * the shared dmabuf.  Arm always; a primary's flip goes through the flip
+    * gate, and only composited (non-primary) surfaces wait. */
    if (src->pPresentCompanion) {
       tritonPresentLock(pD);
       tritonResourceSyncPresentCompanion(pD, src);
       tritonPresentUnlock(pD);
    }
-   tritonPresentFlushAndGate(pD, TRUE /* arm */, !src->IsPresentable /* wait */);
+   UINT64 flipGate = 0;
+   tritonPresentFlushAndGate(pD, TRUE /* arm */, !src->IsPresentable /* wait */,
+                             src->IsPresentable ? &flipGate : NULL);
 
    DXGIDDICB_PRESENT cb;
    memset(&cb, 0, sizeof(cb));
@@ -1340,7 +1331,7 @@ tritonDxgiPresent1(DXGI_DDI_ARG_PRESENT1 *pArgs)
    cb.hDstAllocation = dst ? dst->hKMAllocation : 0;
    cb.pDXGIContext   = pArgs->pDXGIContext;
    cb.hContext       = pD->hKMContext;
-   HRESULT hr = tritonPresentSubmitCb(pD, &cb);
+   HRESULT hr = tritonPresentSubmitCb(pD, &cb, flipGate);
    tritonPresentAmortize(pD);
    InterlockedDecrement(&pD->presentInFlight);
    return hr;

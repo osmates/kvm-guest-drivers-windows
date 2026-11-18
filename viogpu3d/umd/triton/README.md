@@ -71,6 +71,11 @@ which name what Triton needs from the stack below it.
   device's per-format `TILED` bit on when that answer has a tier.
 - `tritonDxgi.c`, `tritonPresentTiming.h`, `tritonShader.c`, `tritonDxbc.c`, `triton_log.h`: the debug switches, the
   shared format, the shader workaround bits and the log go through the backend.
+- `tritonDxgi.c`, the flip of a scanout primary: `tritonPresentFlushAndGate` calls `triton_backend_flip_signal` under
+  `presentLock` once the frame is flushed, and `tritonPresentSubmitCb` hands its value to `triton_backend_flip_wait`
+  under `kmCtxLock` right before `pfnPresentCb`. Neptune's kernel driver held the flip until a token of the present
+  fence's arm retired; this kernel driver has no such gate, so the backend orders the flip after the frame. No comment
+  names that token any more.
 - `triton.h`: `TRITON_ADAPTER` and `TRITON_DEVICE` carry `pBackend` in place of the kernel-mode state; it includes
   `triton_backend.h` and the standard headers `tritonKm.h` used to bring in.
 

@@ -140,8 +140,8 @@ typedef struct TRITON_DEVICE {
     // triton_backend.h: what the backend keeps for this device.
     void                                            *pBackend;
 
-    /* Present GPU-done fence: gates the flip on the producing context's
-     * actual GPU completion.  The presentable blob and the host's render
+    /* Present GPU-done fence: composited presents wait for it, and scanout
+     * primaries pace on it.  The presentable blob and the host's render
      * target alias the same shmem across a process boundary, and Metal has
      * no implicit cross-device sync, so without an explicit fence the
      * KMD/DWM scans out a half-rendered backbuffer.  Lazily created on
@@ -220,7 +220,7 @@ typedef struct TRITON_DEVICE {
  * out with the fence still short: long enough to catch a merely late
  * completion, short enough not to add a second visible stall. */
 #define TRITON_PRESENT_DEADLINE_MS    1000
-/* Bounded run-ahead for KMD-gated (scanout-primary) presents: present N
+/* Bounded run-ahead for scanout-primary presents: present N
  * sleeps until frame N-depth completes on the GPU.  Nothing else paces such
  * an app (sync-interval-0 flips complete on supersede, and the render
  * stream travels the shared-memory ring, invisible to dxgkrnl/DXGI

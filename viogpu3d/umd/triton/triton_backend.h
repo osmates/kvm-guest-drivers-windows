@@ -23,6 +23,11 @@ void triton_backend_log(const char *line);
 BOOL triton_backend_debug(UINT flag);
 int triton_backend_present_gate_trace_ms(void);
 
+// A scanout primary's flip, under presentLock after the flush: the value for triton_backend_flip_wait, or 0 for none.
+UINT64 triton_backend_flip_signal(PTRITON_DEVICE pD, BOOL frameDone);
+// Under kmCtxLock right before pfnPresentCb: the present's kernel context waits on the GPU for that value.
+void triton_backend_flip_wait(PTRITON_DEVICE pD, UINT64 value);
+
 // Shader rewrites a host compiler needs.
 #define TRITON_WA_WIDEN_SCALAR_VS_INPUT_MASK       (1u << 0)
 #define TRITON_WA_TYPE_VS_INPUT_FROM_VERTEX_FORMAT (1u << 1)

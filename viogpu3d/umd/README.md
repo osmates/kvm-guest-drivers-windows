@@ -65,6 +65,15 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
 - Venus escapes through the runtime's `pfnEscapeCb`, which the driver wraps: a blob map whose address does not fit
   this process's pointers is unmapped and fails, so that a 32-bit process never uses the low half of a 64-bit address.
 - The DXGI DDI (present, blt, residency) is Triton's: it presents with `pfnPresentCb` and the kernel allocation above.
+- The flip gate, for a flip of a scanout primary (DWM's, a full-screen app's): dxgkrnl runs a flip once the earlier
+  packets of the present's own kernel context are done, while the frame may still render on Venus's ring contexts, and
+  the kernel driver shows the blob the flip names at its next vsync tick, when the host copies it. So before the
+  present the driver has DXVK submit the frame (`IDXGIVkInteropDevice::FlushRenderingCommands`), signals a timeline
+  semaphore of Venus's on DXVK's queue (`LockSubmissionQueue`), and makes the present's kernel context wait on the GPU
+  for the sync object Venus exports for it (`pfnWaitForSynchronizationObjectFromGpuCb`), as the Direct3D 12 queue gate
+  does. `VIOGPU3D_UMD_DEBUG=no_flip_gate` leaves it out; every 600 flips the log counts those handed to the kernel
+  while their frame's fence had not yet read done. Composited surfaces (an app's windowed swapchain) already wait on
+  the CPU for their frame before the present (Triton).
 - The driver's lines and DXVK's go to `OutputDebugString`. With `VIOGPU3D_UMD_LOG` naming a folder, each process also
   appends them to `<folder>\<exe>-<pid>.log`: LogonUI and DWM run in a session no debug-output collector reaches, and
   a machine-wide variable (`setx /M`, then a restart) reaches them.
@@ -323,6 +332,15 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
   Basic Display's desktop), read their centre pixel back right, and show on the Mac's screen. D3D9 lists this adapter
   first: a plain HAL device fails with `D3DERR_NOTAVAILABLE` (no D3D9 DDI), and `Direct3DCreate9On12` makes a HAL
   device whose clear reads back right.
+- Whole frames (2026-11-19, a window that changes its whole colour every frame and screenshots one after another): DWM's
+  flips showed no torn frame with the flip gate left out (467 shots of a Direct3D 11 and a Direct3D 12 window) or in
+  (463), at the same frame rates. Every one of DWM's flips was handed to the kernel before its frame's fence read
+  done, with the gate or without it; the gate makes the present's kernel context wait for the frame on the GPU.
+  Direct3D 11 triangle windows: no torn shot of 276. Direct3D 12 triangle windows: 117 of 200 shots torn without the
+  flip gate, 68 of 196 with it, several frames in bands; that sample's presents are blts of a companion
+  (`12.Present ... dst=0x0`), not flips. With the system node in physical mode (a variant, not in this tree) and the
+  gate: 827 shots of the colour windows, one of them a frame drawn in part, in tiles; triangles, Direct3D 11 none of
+  131 torn, Direct3D 12 66 of 191.
 
 ## Unproven, and not done
 
@@ -344,8 +362,10 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
   `GetDC`, `AcquireSync`, `ReleaseSync` or `CreateSharedHandle`, it fails with `DXGI_ERROR_UNSUPPORTED`, `E_FAIL` or
   `E_NOTIMPL`, as `OpenSharedResource` and `OpenSharedResource1` already did.
 - No D3D9 DDI.
-- Direct3D 12: that the queue gate keeps app fences and presents GPU-true (one screenshot of the triangle shows two
-  frames, split across a row); DWM composing Direct3D 12 back buffers through their companions; the cache folder rule;
+- The flip gate: its GPU wait is not shown to delay a flip, and no torn flip was seen without it (above).
+- Direct3D 12: the torn frames of a triangle window (above), not explained: the queue gate holds each present until
+  the copy into its companion is done, and a window that changes its colour every frame through the same path shows
+  none; DWM composing Direct3D 12 back buffers through their companions; the cache folder rule;
   that the fork's build without D3DKMT changes nothing an app sees through the runtime (no call of the runtime's reaches
   the parts it built out).
 - Direct3D 12 gaps known now: app waits on CPU-signalled fences are kernel packets the driver never sees (Triton has

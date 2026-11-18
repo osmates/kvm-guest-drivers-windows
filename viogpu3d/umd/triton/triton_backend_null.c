@@ -23,6 +23,19 @@ int triton_backend_present_gate_trace_ms(void)
     return 0;
 }
 
+UINT64 triton_backend_flip_signal(PTRITON_DEVICE pD, BOOL frameDone)
+{
+    (void)pD;
+    (void)frameDone;
+    return 0;
+}
+
+void triton_backend_flip_wait(PTRITON_DEVICE pD, UINT64 value)
+{
+    (void)pD;
+    (void)value;
+}
+
 UINT triton_backend_workaround_flags(void)
 {
     return 0;

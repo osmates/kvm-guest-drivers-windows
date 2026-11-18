@@ -53,11 +53,13 @@ void triton_backend_log(const char *line)
     umd_log_line(line);
 }
 
-// VIOGPU3D_UMD_DEBUG=present_timing,d3d12_list_migration,no_d3d12_xqueue_order (any of them);
+// VIOGPU3D_UMD_DEBUG=present_timing,d3d12_list_migration,no_d3d12_xqueue_order,no_flip_gate (any of them);
 // VIOGPU3D_UMD_PRESENT_GATE_TRACE=<ms>.
 static INIT_ONCE umd_env_once = INIT_ONCE_STATIC_INIT;
 static UINT umd_debug_flags;
 static int umd_gate_trace_ms;
+// no_flip_gate: flips of scanout primaries reach the kernel unordered, as before the flip gate, to measure it.
+static BOOL umd_no_flip_gate;
 
 static BOOL CALLBACK umd_env_read(PINIT_ONCE once, PVOID param, PVOID *context)
 {
@@ -73,6 +75,7 @@ static BOOL CALLBACK umd_env_read(PINIT_ONCE once, PVOID param, PVOID *context)
         umd_debug_flags |= strstr(value, "present_timing") != NULL ? TRITON_DEBUG_PRESENT_TIMING : 0;
         umd_debug_flags |= strstr(value, "d3d12_list_migration") != NULL ? TRITON_DEBUG_D3D12_LIST_MIGRATION : 0;
         umd_debug_flags |= strstr(value, "no_d3d12_xqueue_order") != NULL ? TRITON_DEBUG_NO_D3D12_XQUEUE_ORDER : 0;
+        umd_no_flip_gate = strstr(value, "no_flip_gate") != NULL;
     }
     length = GetEnvironmentVariableA("VIOGPU3D_UMD_PRESENT_GATE_TRACE", value, sizeof(value));
     if (length > 0 && length < sizeof(value))
@@ -110,6 +113,239 @@ void triton_backend_adapter_probe(PTRITON_ADAPTER pAdapter, struct triton_adapte
     out->wddm2_0_only = TRUE;
     // DXVK's own feature level and tiled resources tier, which Triton forwards.
     out->caps_flags = TRITON_HOSTCAP_HOST_FEATURE_LEVEL;
+}
+
+// DXVK's IDXGIVkInteropDevice (dxvk/src/dxgi/dxgi_interfaces.h), whose methods C reaches through this table.
+struct umd_dxvk_interop;
+
+struct umd_dxvk_interop_vtbl
+{
+    HRESULT(STDMETHODCALLTYPE *QueryInterface)(struct umd_dxvk_interop *self, REFIID iid, void **out);
+    ULONG(STDMETHODCALLTYPE *AddRef)(struct umd_dxvk_interop *self);
+    ULONG(STDMETHODCALLTYPE *Release)(struct umd_dxvk_interop *self);
+    void(STDMETHODCALLTYPE *GetVulkanHandles)(struct umd_dxvk_interop *self,
+                                              VkInstance *instance,
+                                              VkPhysicalDevice *physical,
+                                              VkDevice *device);
+    void(STDMETHODCALLTYPE *GetSubmissionQueue)(struct umd_dxvk_interop *self, VkQueue *queue, uint32_t *family);
+    void(STDMETHODCALLTYPE *TransitionSurfaceLayout)(struct umd_dxvk_interop *self,
+                                                     void *surface,
+                                                     const VkImageSubresourceRange *range,
+                                                     VkImageLayout from,
+                                                     VkImageLayout to);
+    void(STDMETHODCALLTYPE *FlushRenderingCommands)(struct umd_dxvk_interop *self);
+    void(STDMETHODCALLTYPE *LockSubmissionQueue)(struct umd_dxvk_interop *self);
+    void(STDMETHODCALLTYPE *ReleaseSubmissionQueue)(struct umd_dxvk_interop *self);
+};
+
+struct umd_dxvk_interop
+{
+    const struct umd_dxvk_interop_vtbl *lpVtbl;
+};
+
+static const GUID umd_iid_dxvk_interop = {0xe2ef5fa5, 0xdc21, 0x4af7, {0x90, 0xc4, 0xf6, 0x7e, 0xf6, 0xa0, 0x93, 0x23}};
+
+// The flip gate: DXVK's queue signals the semaphore after a frame, and the present's context waits for it.
+struct umd_flip_gate
+{
+    // Made at the device's first flip; failed once, never again.
+    BOOL tried;
+    struct umd_dxvk_interop *interop;
+    VkDevice device;
+    VkQueue queue;
+    VkSemaphore semaphore;
+    D3DKMT_HANDLE sync;
+    UINT64 value;
+    PFN_vkQueueSubmit queueSubmit;
+    PFN_vkDestroySemaphore destroySemaphore;
+    LONG flips;
+    LONG running;
+};
+
+struct umd11_device
+{
+    struct umd_device base;
+    struct umd_flip_gate gate;
+};
+
+static void umd_flip_gate_fini(struct umd_flip_gate *gate)
+{
+    if (gate->semaphore != VK_NULL_HANDLE && gate->destroySemaphore != NULL)
+    {
+        gate->destroySemaphore(gate->device, gate->semaphore, NULL);
+    }
+    gate->semaphore = VK_NULL_HANDLE;
+    gate->sync = 0;
+    if (gate->interop != NULL)
+    {
+        gate->interop->lpVtbl->Release(gate->interop);
+        gate->interop = NULL;
+    }
+}
+
+static BOOL umd_flip_gate_init(struct umd_flip_gate *gate, PTRITON_DEVICE pD)
+{
+    PFN_vkCreateSemaphore createSemaphore;
+    PFN_vkGetSemaphoreWin32HandleKHR getSemaphoreWin32Handle;
+    VkSemaphoreTypeCreateInfo type;
+    VkExportSemaphoreCreateInfo exportInfo;
+    VkSemaphoreCreateInfo create;
+    VkSemaphoreGetWin32HandleInfoKHR get;
+    VkInstance instance = VK_NULL_HANDLE;
+    VkPhysicalDevice physical = VK_NULL_HANDLE;
+    uint32_t family = 0;
+    HANDLE handle = NULL;
+    VkResult result;
+
+    gate->tried = TRUE;
+    if (pD->pDev1 == NULL || pD->KTCallbacks.pfnWaitForSynchronizationObjectFromGpuCb == NULL ||
+        FAILED(ID3D11Device1_QueryInterface(pD->pDev1, &umd_iid_dxvk_interop, (void **)&gate->interop)))
+    {
+        gate->interop = NULL;
+        umd_log("flip gate: no DXVK interop or no GPU wait callback; flips are not ordered after their frames");
+        return FALSE;
+    }
+    gate->interop->lpVtbl->GetVulkanHandles(gate->interop, &instance, &physical, &gate->device);
+    gate->interop->lpVtbl->GetSubmissionQueue(gate->interop, &gate->queue, &family);
+    umd_vk_note_instance(instance);
+    createSemaphore = (PFN_vkCreateSemaphore)umd_vk_icd_device_proc(gate->device, "vkCreateSemaphore");
+    getSemaphoreWin32Handle = (PFN_vkGetSemaphoreWin32HandleKHR)umd_vk_icd_device_proc(gate->device,
+                                                                                       "vkGetSemaphoreWin32HandleKHR");
+    gate->destroySemaphore = (PFN_vkDestroySemaphore)umd_vk_icd_device_proc(gate->device, "vkDestroySemaphore");
+    gate->queueSubmit = (PFN_vkQueueSubmit)umd_vk_icd_device_proc(gate->device, "vkQueueSubmit");
+    if (gate->queue == VK_NULL_HANDLE || createSemaphore == NULL || getSemaphoreWin32Handle == NULL ||
+        gate->destroySemaphore == NULL || gate->queueSubmit == NULL)
+    {
+        umd_log("flip gate: DXVK's device has no exportable semaphores (VK_KHR_external_semaphore_win32)");
+        umd_flip_gate_fini(gate);
+        return FALSE;
+    }
+    memset(&type, 0, sizeof(type));
+    type.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+    type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+    memset(&exportInfo, 0, sizeof(exportInfo));
+    exportInfo.sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO;
+    exportInfo.pNext = &type;
+    // Venus exports only timeline semaphores, and as a D3D11 fence: the runtime's sync object behind it.
+    exportInfo.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D11_FENCE_BIT;
+    memset(&create, 0, sizeof(create));
+    create.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    create.pNext = &exportInfo;
+    result = createSemaphore(gate->device, &create, NULL, &gate->semaphore);
+    if (result != VK_SUCCESS)
+    {
+        gate->semaphore = VK_NULL_HANDLE;
+        umd_log("flip gate: Venus made no exportable timeline semaphore: %d", (int)result);
+        umd_flip_gate_fini(gate);
+        return FALSE;
+    }
+    memset(&get, 0, sizeof(get));
+    get.sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR;
+    get.semaphore = gate->semaphore;
+    get.handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_D3D11_FENCE_BIT;
+    result = getSemaphoreWin32Handle(gate->device, &get, &handle);
+    gate->sync = (D3DKMT_HANDLE)(UINT_PTR)handle;
+    if (result != VK_SUCCESS || gate->sync == 0)
+    {
+        umd_log("flip gate: Venus gave no sync object for the semaphore: %d", (int)result);
+        umd_flip_gate_fini(gate);
+        return FALSE;
+    }
+    umd_log("flip gate: on, queue family %u", (unsigned)family);
+    return TRUE;
+}
+
+UINT64 triton_backend_flip_signal(PTRITON_DEVICE pD, BOOL frameDone)
+{
+    struct umd11_device *dev = (struct umd11_device *)pD->pBackend;
+    struct umd_flip_gate *gate;
+    VkTimelineSemaphoreSubmitInfo timeline;
+    VkSubmitInfo submit;
+    VkResult result;
+    UINT64 value;
+    LONG flips;
+    LONG running;
+
+    if (dev == NULL)
+    {
+        return 0;
+    }
+    gate = &dev->gate;
+    InitOnceExecuteOnce(&umd_env_once, umd_env_read, NULL, NULL);
+    flips = InterlockedIncrement(&gate->flips);
+    running = frameDone ? gate->running : InterlockedIncrement(&gate->running);
+    if (flips % 600 == 0)
+    {
+        umd_log("flip gate: %ld flips of scanout primaries, %ld of them with their frame still running when handed "
+                "to the kernel, %s",
+                flips,
+                running,
+                umd_no_flip_gate  ? "not ordered (no_flip_gate)"
+                : gate->sync != 0 ? "ordered"
+                                  : "not ordered");
+    }
+    if (umd_no_flip_gate)
+    {
+        return 0;
+    }
+    if (!gate->tried)
+    {
+        umd_flip_gate_init(gate, pD);
+    }
+    if (gate->sync == 0)
+    {
+        return 0;
+    }
+    value = gate->value + 1;
+    memset(&timeline, 0, sizeof(timeline));
+    timeline.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+    timeline.signalSemaphoreValueCount = 1;
+    timeline.pSignalSemaphoreValues = &value;
+    memset(&submit, 0, sizeof(submit));
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.pNext = &timeline;
+    submit.signalSemaphoreCount = 1;
+    submit.pSignalSemaphores = &gate->semaphore;
+    // The frame Triton flushed reaches the queue first; a signal then covers every earlier submission.
+    gate->interop->lpVtbl->FlushRenderingCommands(gate->interop);
+    gate->interop->lpVtbl->LockSubmissionQueue(gate->interop);
+    result = gate->queueSubmit(gate->queue, 1, &submit, VK_NULL_HANDLE);
+    gate->interop->lpVtbl->ReleaseSubmissionQueue(gate->interop);
+    if (result != VK_SUCCESS)
+    {
+        umd_log("flip gate: the semaphore signal failed: %d", (int)result);
+        return 0;
+    }
+    gate->value = value;
+    return value;
+}
+
+void triton_backend_flip_wait(PTRITON_DEVICE pD, UINT64 value)
+{
+    struct umd11_device *dev = (struct umd11_device *)pD->pBackend;
+    D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMGPU wait;
+    HRESULT hr;
+
+    if (dev == NULL || dev->gate.sync == 0 || pD->hKMContext == NULL)
+    {
+        return;
+    }
+    memset(&wait, 0, sizeof(wait));
+    wait.hContext = pD->hKMContext;
+    wait.ObjectCount = 1;
+    wait.ObjectHandleArray = &dev->gate.sync;
+    wait.MonitoredFenceValueArray = &value;
+    hr = pD->KTCallbacks.pfnWaitForSynchronizationObjectFromGpuCb(pD->hRTDevice.handle, &wait);
+    if (FAILED(hr))
+    {
+        static LONG failures;
+        if (InterlockedIncrement(&failures) == 1)
+        {
+            umd_log("flip gate: the present context's wait for value %llu failed 0x%08lx",
+                    (unsigned long long)value,
+                    (unsigned long)hr);
+        }
+    }
 }
 
 // One per process: each Venus instance has its own contexts on the host.
@@ -269,7 +505,7 @@ HRESULT triton_backend_create_device(PTRITON_DEVICE pD,
         return E_INVALIDARG;
     }
 
-    dev = (struct umd_device *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*dev));
+    dev = (struct umd_device *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(struct umd11_device));
     if (dev == NULL)
     {
         return E_OUTOFMEMORY;
@@ -308,6 +544,7 @@ void triton_backend_destroy_device(PTRITON_DEVICE pD)
     {
         return;
     }
+    umd_flip_gate_fini(&((struct umd11_device *)dev)->gate);
     umd_vk_destroy(&dev->vk);
     umd_device_callbacks_fini(dev);
     HeapFree(GetProcessHeap(), 0, dev);
