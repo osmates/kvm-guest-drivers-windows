@@ -15,8 +15,9 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
 
 - Compiled and linked for Windows on Arm with llvm-mingw through `Tools/build-macos.sh --d3d-umd`, for aarch64,
   arm64ec and i686, in the Win11 and the Win10 package; vkd3d-proton for ARM64X and i686.
-- Run in a Windows 11 guest (2026-11-18): Direct3D 12 devices on Venus in ARM64, x64 and x86 processes; no Direct3D
-  11 device and no present yet. See "Measured in Windows" below.
+- Run in a Windows 11 guest (2026-11-18): Direct3D 11 and 12 devices on Venus in ARM64, x64 and x86 processes, and
+  a Direct3D 11 draw into a texture that reads back right in all three; no present and no Direct3D 12 draw yet. See
+  "Measured in Windows" below.
 - The platform-free parts have unit tests that run on macOS: `sh viogpu3d/umd/tests/run-host-tests.sh`.
 - The build checks the package with `tests/check-package.sh`.
 
@@ -126,7 +127,9 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
   `GetResourceTiling`, each format carries vkd3d-proton's `TILED` bit, and each mapping change is ordered as a batch
   is: after the other queues' earlier batches, before the app's later fences.
 - D3D9: the D3D9 slot names this DLL, which has no `OpenAdapter`. No documented key turns D3D9 over to D3D9On12 for
-  a driver, so D3D9 apps get D3D9On12 on this driver only when they call `Direct3DCreate9On12` themselves.
+  a driver, so D3D9 apps get D3D9On12 on this driver only when they call `Direct3DCreate9On12` themselves, and only
+  once the desktop is on this adapter: D3D9 and `Direct3DCreate9On12` list only the adapters that drive a display
+  (`../README.md`, "Not done yet").
 
 ## DXVK
 
@@ -135,7 +138,9 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
   no WSI, no global instance, no swapchain), and three commits on it: a meson `umd` option that builds static D3D11
   and DXGI libraries, the entry points of `src/d3d11/d3d11_umd.h` (`DXVKUmdCreateFactory`, `DXVKUmdCreateTexture2D`)
   with linear scanout textures, and GDI interop, keyed mutexes and NT handle sharing built out under the option, so
-  the driver imports no `D3DKMT*` function. A build without the `umd` option is unchanged by them.
+  the driver imports no `D3DKMT*` function. A fourth, in the umd build's extension provider: it asks for
+  `VK_EXT_image_drm_format_modifier` only on a device that lists it (Venus on a Mac host does not, and the device
+  then failed to create). A build without the `umd` option is unchanged by them.
 - The build runs DXVK's meson three times on that copy: aarch64-w64-mingw32, arm64ec-w64-mingw32 and
   i686-w64-mingw32. ARM64EC gets the CPU family `aarch64`: its code is ARM64 code, and DXVK's own ARM64EC paths key on
   `__arm64ec__`.
@@ -248,6 +253,8 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
   and `OpenAdapter12` log the LUID and capability sets `0x16` (Venus among them); Triton offers its versions; the
   driver loads `vulkan_virtio.dll` and `viogpu3d_vkd3d.dll` from the driver store folder, and their `_x86` builds in
   x86 processes. The Direct3D 12 runtime takes the version Triton offers from this WDDM 2.0 kernel driver.
+- x64 and x86 processes, both APIs: the x64 runtimes take the ARM64EC view of `UserModeDriverName`'s DLL, the WOW64
+  ones `UserModeDriverNameWow`'s, and Venus maps its memory in a 32-bit process.
 - Venus's contexts need the kernel driver's nodes to report `GpuMmuSupported` (from a restart of Windows on), and its
   memory needs the kernel driver to open allocations with `DxgkCbAcquireHandleData` (`../README.md`). Before both,
   every device failed: `0xc000000d` for each context, then `failed to allocate/map ring shmem`.
@@ -255,31 +262,43 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
   level 12_0 at most, shader model 6.0, resource binding tier 3, tiled resources tier 2. A compute queue's copy that
   the direct queue waits for reads back right, a queue waiting for a CPU fence holds until the CPU signals,
   `MakeResident`, `Evict` and `SetResidencyPriority` succeed, and the tiled resources sample passes every check but
-  one (a buffer tile read in the invocation that wrote it). The core layer's `pfnAllocateCb` takes `hResource` NULL;
-  the `E_INVALIDARG` seen before was the kernel driver's failed open.
+  one (a buffer tile read in the invocation that wrote it). The core layer's `pfnAllocateCb` takes `hResource` NULL
+  for Venus's own memory, as `D3DDDICB_ALLOCATE` documents (NULL ties the allocations to the device; only shared
+  resources need one), and the driver logs the first such allocation of each process; the `E_INVALIDARG` seen before
+  was the kernel driver's failed open.
+- Direct3D 12 graphics pipelines: the triangle's pipeline fails to build on the host (KosmicKrisp's Metal compiler:
+  "Compiler failed to build request"). Venus makes pipelines without waiting for the answer, so the next
+  `vkCmdBindPipeline` names an object the host does not have, the host's decoder stops the context, and the process
+  ends with `vn_ring_submit abort on fatal`. Compute work and copies run.
 - Direct3D 12 presents: `CreateSwapChainForHwnd` fails (`E_OUTOFMEMORY` on the desktop,
   `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE` in session 0). The host refuses the back buffers' blob (`RESOURCE_CREATE_BLOB`,
   `ERR_UNSPEC`), so `pfnAllocateCb` with `hResource` set fails with `E_FAIL`.
-- Direct3D 11: DXVK's `vkCreateDevice` on Venus fails with `VK_ERROR_EXTENSION_NOT_PRESENT`, so `CreateDevice` fails
-  with `E_FAIL`. In session 0 DXVK enables `VK_KHR_incremental_present` and `VK_EXT_hdr_metadata` without
-  `VK_KHR_swapchain`: Venus implements both itself and keeps them from the host only when `VK_KHR_swapchain` is on,
-  and the host's renderer knows neither. In the signed-in session DXVK enables `VK_KHR_swapchain` too and still
-  fails, though KosmicKrisp on the host lists every other extension DXVK enables: not found yet.
+- Direct3D 11: `D3D11CreateDevice` makes a DXVK device on Venus in ARM64, x64 and x86 processes, at feature level
+  12_0 when asked for it, and a triangle drawn into a texture 120 times reads back as drawn. Before, DXVK's
+  `vkCreateDevice` failed with `VK_ERROR_EXTENSION_NOT_PRESENT`: DXVK's umd extension provider added
+  `VK_EXT_image_drm_format_modifier` without asking the device, Venus on a Mac host does not list it, and Mesa's
+  device creation refused it before anything reached the host (Venus's own log of the create info, `VN_DEBUG=init`).
+  The provider now asks for it only where the device lists it (the `dxvk` submodule).
 - The Direct3D 12 runtime's kernel-thunk table has `CreateContextVirtual`, `DestroyContext`,
   `CreateSynchronizationObject2`, `DestroySynchronizationObject`, `SignalFromGpu2`, `WaitFromGpu`, `SignalFromCpu`,
   `WaitFromCpu`, `SubmitCommand`, `Escape`, `CreatePagingQueue` and `MakeResident`, and no `Allocate` or
   `Deallocate`; the core layer has `Allocate`, `Deallocate` and `CreateContextVirtual`.
-- Windows keeps the desktop on a software display adapter (no Direct3D 11 device for DWM here), whose render side
-  DXGI lists as "Microsoft Basic Render Driver" without `DXGI_ADAPTER_FLAG_SOFTWARE`, first in session 0: an app that
-  takes the first adapter that is not software renders with WARP. D3D9 takes the desktop's adapter, and
-  `Direct3DCreate9On12` D3D9's, so both land on Basic Render.
+- Windows keeps the desktop on a software display adapter, whose render side DXGI lists as "Microsoft Basic Render
+  Driver" without `DXGI_ADAPTER_FLAG_SOFTWARE`: an app that takes the first adapter that is not software can render
+  with WARP. D3D9 lists only the adapters that drive a display, so neither D3D9 nor `Direct3DCreate9On12` finds this
+  one. With Direct3D 11 working, LogonUI loads this driver and the screen stays black (`../README.md`).
 
 ## Unproven, and not done
 
-- A Direct3D 11 device (above), then every step after it: that DXVK reaches feature level 11_0 or 11_1 through Venus
-  on KosmicKrisp, that DWM composes, and the rest of this list. No Windows 10 guest has had the Win10 package.
-- x64 and x86 apps on Direct3D 11. Direct3D 12 runs in both (above): the x64 runtime takes the ARM64EC view of
-  `UserModeDriverName`'s DLL, the WOW64 one `UserModeDriverNameWow`'s, and Venus maps its memory in a 32-bit process.
+- Presents, both APIs: the host's blob for swapchain buffers and shared surfaces (`../README.md`), then that DWM
+  composes, and the rest of this list. No Windows 10 guest has had the Win10 package.
+- Direct3D 12 graphics pipelines fail on the host (KosmicKrisp's Metal compiler, above), so no Direct3D 12 draw runs
+  yet. The next measure is the pipeline's SPIR-V (`VKD3D_SHADER_DUMP_PATH`) and the Metal compiler's error.
+- Not measured: whether Venus must keep the WSI extensions it implements itself (`VK_KHR_incremental_present`,
+  `VK_EXT_hdr_metadata`, the swapchain maintenance ones) from the host when an app enables them without
+  `VK_KHR_swapchain`. DXVK did so in session 0 in an earlier run; in later session 0 runs it enabled
+  `VK_KHR_swapchain` with them, and the host took `VK_EXT_hdr_metadata` without it from vkd3d-proton. A Mesa change
+  for it waits for a session 0 run that shows the device failing without the change and made with it.
 - Shared textures need Venus to export image memory as `OPAQUE_WIN32_KMT`; primaries and shared textures need linear
   render targets on KosmicKrisp, and the kernel driver's flip of a `HOST3D` primary.
 - Opening another process's shared texture or the kernel driver's surfaces: the host side exists (OSMates with the
@@ -303,8 +322,8 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
   no placement, as the driver takes it, and that Venus on Windows binds tiles of the memory DXVK and vkd3d-proton
   allocate. Tier 1 leaves reads of unmapped tiles undefined; on KosmicKrisp they read zero.
 - Feature level 12_0, both APIs: that the runtimes take it from these caps (Microsoft documents what each level
-  needs, not what the runtimes check), that the Direct3D 11 runtime takes 12_0 from a WDDM 2.0 DDI and creates its
-  devices there, and residency feedback and strict reads of unmapped tiles through Venus on KosmicKrisp.
+  needs, not what the runtimes check), and residency feedback and strict reads of unmapped tiles through Venus on
+  KosmicKrisp.
 
 ## Licences
 

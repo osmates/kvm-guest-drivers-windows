@@ -8,9 +8,10 @@ display-only driver in `viogpu` stays as it is.
 
 - Compiled for Windows 11 ARM64 with clang and lld-link through `Tools/build-macos.sh`. Not built with MSVC yet.
 - Run in a Windows 11 guest on OSMates' accelerated GPU (2026-11-18): the driver starts (problem code 0) and dxgkrnl
-  reports the adapter as render and display, WDDM 2.0, GpuMmu. Direct3D 12 devices run on it through vkd3d-proton
-  and Venus; Direct3D 11 devices and presents do not yet, and the desktop stays on a software display adapter
-  (below, "Not done yet").
+  reports the adapter as render and display, WDDM 2.0, GpuMmu. Direct3D 11 and 12 devices run on it through DXVK,
+  vkd3d-proton and Venus in ARM64, x64 and x86 processes, and a Direct3D 11 draw into a texture reads back right.
+  Presents do not work yet, Direct3D 12 graphics pipelines fail on the host, and the desktop stays on a software
+  display adapter (below, "Not done yet").
 - dxgkrnl fails the adapter after a successful start, code 43, when its software key has no `UserModeDriverName`
   (`Microsoft-Windows-DxgKrnl-Admin` event 549, "Object Name not found", `StartAdapter_AddAdapterFailed`). So the
   package always carries the Direct3D driver, and the build refuses to pack it without the Direct3D driver's DLLs,
@@ -35,9 +36,11 @@ display-only driver in `viogpu` stays as it is.
 
 ## Model
 
-- WDDM 2.0 with GPU virtual addressing (GpuMmu). The page tables are written by the CPU into a 16 MiB segment of
-  contiguous memory. The device never reads a GPU virtual address: it addresses memory by resource.
-- Two segments: a 1 GiB aperture of system memory, and the page tables.
+- WDDM 2.0 with GPU virtual addressing (GpuMmu). The page tables are written by the CPU, in the implicit system
+  memory segment (segment 0), one page each, as `DXGK_PAGE_TABLE_LEVEL_DESC` documents for that segment: two levels
+  of 256 entries and a root of 16 over 32 bits. The device never reads a GPU virtual address: it addresses memory by
+  resource. The driver allocates no contiguous memory for them, so a start never fails for want of it.
+- One segment: a 1 GiB aperture of system memory.
 - 64 nodes: 0 for the system, 1 for Venus, 2 for paging, 3 to 63 for Venus rings 0 to 60. Mesa's Venus ICD opens
   one virtual context a ring on nodes 3 to 63. Every node reports `GpuMmuSupported`: without it dxgkrnl refuses every
   virtual context with `STATUS_INVALID_PARAMETER` before the driver sees it, and takes the change only after a restart
@@ -96,16 +99,18 @@ merge request 38731): the same tags and layouts.
 
 ## Not done yet
 
-- A Direct3D 11 device: DXVK's Vulkan device fails on Venus (`umd/README.md`).
-- Presents: the host refuses the blob of a Direct3D 12 swapchain's buffers (`RESOURCE_CREATE_BLOB`, `ERR_UNSPEC`).
-- The desktop on this adapter: Windows lights a software display adapter instead, the scanout keeps the firmware's
-  boot screen, and `DxgkDdiCommitVidPn` gets no path. Likely because DWM gets no Direct3D 11 device here; to check
-  once it does.
-- After several restarts of the device in one boot, the 16 MiB of contiguous memory for the page tables segment can
-  be missing, and the start fails (`STATUS_INSUFFICIENT_RESOURCES`, code 43). Page tables in the implicit system
-  memory segment, as Microsoft's compute-only sample keeps them, would need none.
+- Presents: the host refuses the blob of a swapchain's buffers and of every shared surface (`RESOURCE_CREATE_BLOB`,
+  `ERR_UNSPEC`). The Direct3D 12 driver gives every one-level render target such a surface, so a Direct3D 12 render
+  target fails to create too.
+- Direct3D 12 graphics pipelines fail on the host (KosmicKrisp's Metal compiler), so no Direct3D 12 draw runs yet
+  (`umd/README.md`).
+- The desktop on this adapter: Windows keeps it on a software display adapter, and `DxgkDdiCommitVidPn` is never
+  called: dxgkrnl asks `DxgkDdiIsSupportedVidPn` and `DxgkDdiEnumVidPnCofuncModality` and stops there, also with a
+  Direct3D 11 device working and the display configuration database made again. Since Direct3D 11 works here,
+  LogonUI renders on this adapter, the screen stays black and nobody can sign in.
 - `SupportPerEngineTDR` stays off: with it dxgkrnl refuses to start the adapter.
-- A D3D9 DDI (D3D9 apps get D3D9On12 only when they ask for it themselves).
+- A D3D9 DDI. D3D9 apps get D3D9On12 only when they ask for it themselves, and only once the desktop is on this
+  adapter (above): D3D9 and `Direct3DCreate9On12` list only the adapters that drive a display.
 - A run of the surfaces above and the present's blts in Windows, with another process importing them through Venus.
 - Hardware queues and the GPU's own scheduling.
 - After a power transition the host has lost its contexts and resources; the driver does not report a lost device
