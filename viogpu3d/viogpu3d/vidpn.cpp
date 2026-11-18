@@ -1174,7 +1174,8 @@ NTSTATUS VioGpuVidPN::AddSingleTargetMode(_In_ CONST DXGK_VIDPNTARGETMODESET_INT
     {
         pPinnedSourceSize = &pVidPnPinnedSourceModeInfo->Format.Graphics.PrimSurfSize;
     }
-    PVIDEO_MODE_INFORMATION pCurrent = &m_ModeInfo[m_CurrentModeIndex];
+    // The host's display size, which the monitor prefers too.
+    PVIDEO_MODE_INFORMATION pPreferred = &m_ModeInfo[m_CustomModeIndex];
     for (UINT ModeIndex = 0; ModeIndex < GetModeCount(); ++ModeIndex)
     {
         PVIDEO_MODE_INFORMATION pModeInfo = &m_ModeInfo[ModeIndex];
@@ -1195,8 +1196,8 @@ NTSTATUS VioGpuVidPN::AddSingleTargetMode(_In_ CONST DXGK_VIDPNTARGETMODESET_INT
         }
         BuildVideoSignalInfo(&pVidPnTargetModeInfo->VideoSignalInfo, pModeInfo);
         pVidPnTargetModeInfo->Preference = D3DKMDT_MP_NOTPREFERRED;
-        if (pModeInfo->VisScreenWidth == pCurrent->VisScreenWidth &&
-            pModeInfo->VisScreenHeight == pCurrent->VisScreenHeight)
+        if (pModeInfo->VisScreenWidth == pPreferred->VisScreenWidth &&
+            pModeInfo->VisScreenHeight == pPreferred->VisScreenHeight)
         {
             pVidPnTargetModeInfo->Preference = D3DKMDT_MP_PREFERRED;
         }
@@ -1247,7 +1248,7 @@ NTSTATUS VioGpuVidPN::AddSingleMonitorMode(_In_ CONST DXGKARG_RECOMMENDMONITORMO
         return Status;
     }
 
-    pVbeModeInfo = &m_ModeInfo[m_CurrentModeIndex];
+    pVbeModeInfo = &m_ModeInfo[m_CustomModeIndex];
 
     BuildVideoSignalInfo(&pMonitorSourceMode->VideoSignalInfo, pVbeModeInfo);
 
@@ -2310,10 +2311,10 @@ void VioGpuVidPN::SetCustomDisplay(_In_ USHORT xres, _In_ USHORT yres)
     }
     tmpModeInfo.XResolution = m_pAdapter->IsFlexResolution() ? xres : max(MIN_WIDTH_SIZE, xres);
     tmpModeInfo.YResolution = m_pAdapter->IsFlexResolution() ? yres : max(MIN_HEIGHT_SIZE, yres);
-    // The framebuffer memory was sized at start; a larger display waits for the next start.
+    // The framebuffer is sized after the mode list at start, this mode included; a larger display waits for a restart.
     ULONGLONG bytes = (ULONGLONG)tmpModeInfo.XResolution * tmpModeInfo.YResolution * 4;
-    if (!IsDisplaySizeSupported(tmpModeInfo.XResolution, tmpModeInfo.YResolution) ||
-        bytes > m_pAdapter->frameSegment.GetSize())
+    SIZE_T room = m_pAdapter->frameSegment.GetSize();
+    if (!IsDisplaySizeSupported(tmpModeInfo.XResolution, tmpModeInfo.YResolution) || (room != 0 && bytes > room))
     {
         DbgPrint(TRACE_LEVEL_ERROR,
                  ("%s: (%dx%d) is past what this start supports\n",

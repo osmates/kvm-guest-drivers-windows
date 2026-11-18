@@ -276,6 +276,7 @@ NTSTATUS APIENTRY VioGpu3dCreateDevice(_In_ CONST HANDLE hAdapter, _Inout_ DXGKA
     {
         return STATUS_NO_MEMORY;
     }
+    DbgPrint(TRACE_LEVEL_INFORMATION, ("device: flags 0x%X\n", pCreateDevice->Flags.Value));
     pCreateDevice->hDevice = pDevice;
     return STATUS_SUCCESS;
 }
@@ -396,6 +397,8 @@ NTSTATUS APIENTRY VioGpu3dCreateContext(_In_ CONST HANDLE hDevice, _Inout_ DXGKA
         return STATUS_NO_MEMORY;
     }
     pCreateContext->hContext = pContext;
+    DbgPrint(TRACE_LEVEL_INFORMATION,
+             ("context: node %u, flags 0x%X\n", pCreateContext->NodeOrdinal, pCreateContext->Flags.Value));
     DXGK_CONTEXTINFO *pInfo = &pCreateContext->ContextInfo;
     RtlZeroMemory(pInfo, sizeof(*pInfo));
     if (pCreateContext->Flags.VirtualAddressing)

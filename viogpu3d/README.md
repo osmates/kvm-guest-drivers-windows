@@ -9,9 +9,10 @@ display-only driver in `viogpu` stays as it is.
 - Compiled for Windows 11 ARM64 with clang and lld-link through `Tools/build-macos.sh`. Not built with MSVC yet.
 - Run in a Windows 11 guest on OSMates' accelerated GPU (2026-11-18): the driver starts (problem code 0) and dxgkrnl
   reports the adapter as render and display, WDDM 2.0, GpuMmu. Direct3D 11 and 12 devices run on it through DXVK,
-  vkd3d-proton and Venus in ARM64, x64 and x86 processes, and a Direct3D 11 draw into a texture reads back right.
-  Presents do not work yet, Direct3D 12 graphics pipelines fail on the host, and the desktop is not on this adapter
-  yet (below, "Not done yet").
+  vkd3d-proton and Venus in ARM64, x64 and x86 processes, and a Direct3D 11 draw into a texture reads back right. With
+  a host that has OSMates' next KosmicKrisp (osmates/mesa `kk-linear-color-attachment`), a sign-in works and both APIs
+  draw and present. The desktop is not on this adapter yet, so the Mac's screen shows none of it (below, "Not done
+  yet").
 - dxgkrnl fails the adapter after a successful start, code 43, when its software key has no `UserModeDriverName`
   (`Microsoft-Windows-DxgKrnl-Admin` event 549, "Object Name not found", `StartAdapter_AddAdapterFailed`). So the
   package always carries the Direct3D driver, and the build refuses to pack it without the Direct3D driver's DLLs,
@@ -94,36 +95,39 @@ merge request 38731): the same tags and layouts.
 ## Display
 
 - One scanout, at sizes up to 8184 a side and 16,777,216 pixels: a 5K screen's 5120 x 2880 fits.
-- The VidPN: target modes of every listed size at 60 Hz with the active size equal to the total size, only the pinned
-  source's size once a source is pinned, and the other way round; identity and centered scaling (the same thing at
-  equal sizes) and identity rotation, since the scanout shows the source as it is. The rotation support keeps the
-  offset bits dxgkrnl set: clearing them is bug check 0x113, subtype 0x1C. `DxgkDdiIsSupportedVidPn` refuses a path
-  whose pinned source and target differ in size. `DxgkDdiIsSupportedVidPn`, `DxgkDdiEnumVidPnCofuncModality` and
-  `DxgkDdiCommitVidPn` log the paths, pins and mode counts they saw; `DxgkDdiRecommendMonitorModes`,
-  `DxgkDdiUpdateActiveVidPnPresentPath`, `DxgkDdiQueryChildStatus`, `DxgkDdiSetVidPnSourceVisibility` and each new
-  source address log one line.
+- The VidPN: target modes of every listed size at 60 Hz with the active size equal to the total size, the host's
+  display size preferred, only the pinned source's size once a source is pinned, and the other way round; identity and
+  centered scaling (the same thing at equal sizes) and identity rotation, since the scanout shows the source as it is.
+  The rotation support keeps the offset bits dxgkrnl set: clearing them is bug check 0x113, subtype 0x1C.
+  `DxgkDdiIsSupportedVidPn` refuses a path whose pinned source and target differ in size. `DxgkDdiIsSupportedVidPn`,
+  `DxgkDdiEnumVidPnCofuncModality` and `DxgkDdiCommitVidPn` log the paths, pins and mode counts they saw;
+  `DxgkDdiRecommendMonitorModes`, `DxgkDdiUpdateActiveVidPnPresentPath`, `DxgkDdiQueryChildStatus`,
+  `DxgkDdiSetVidPnSourceVisibility` and each new source address log one line.
 - The flip thread reports `DXGK_INTERRUPT_CRTC_VSYNC` every 16 ms while `DxgkDdiControlInterrupt` has it on, and
-  each `DxgkDdiControlInterrupt` call is logged. Not measured yet: whether dxgkrnl turns it on for this adapter.
-- Modes come from `GET_DISPLAY_INFO` and the EDID, read by data block as viogpudo now does.
+  each `DxgkDdiControlInterrupt` call is logged. dxgkrnl turns it on and off for this adapter from a few seconds after
+  start, before any VidPN is committed (measured 2026-11-18).
+- Modes come from `GET_DISPLAY_INFO` and the EDID, read by data block as viogpudo now does. The host's display size
+  is the custom mode from start on; the framebuffer memory is then sized for the largest mode, and a later, larger
+  display waits for the next start.
 - A flip shows a 3D resource with `SET_SCANOUT` or a blob with `SET_SCANOUT_BLOB`. No hardware cursor yet.
 
 ## Not done yet
 
-- Presents: OSMates' host refused the blob of a swapchain's buffers and of every shared surface
-  (`RESOURCE_CREATE_BLOB`, `ERR_UNSPEC`) until main `d3303957`, which pins virglrenderer `b6e26840`. Presents with
-  that host are not measured yet: they need the desktop on this adapter (below).
+- Presents on the Mac's screen. With virglrenderer `b6e26840` (main `575ca684`'s pin) and KosmicKrisp from
+  osmates/mesa `2b0fd564`, which adds `kk: Allow linear 2D color attachments` and `kk: Emit fcanonicalize` to main's
+  Mesa pin, a Direct3D 11 and a Direct3D 12 triangle present 600 frames each on the signed-in desktop (2026-11-18),
+  which is still the Basic Display adapter's, so nothing reaches this adapter's scanout (below).
 - Direct3D 12 graphics pipelines need a KosmicKrisp that prints `fcanonicalize` in MSL; OSMates' pin does not yet
   (`umd/README.md`).
-- The desktop on this adapter. Until 2026-11-18 the VidPN the driver gave back was not valid (one 640 x 480 target
-  mode for a 1024 x 768 source, an unset active size, centered scaling), so dxgkrnl asked `DxgkDdiIsSupportedVidPn`
-  and `DxgkDdiEnumVidPnCofuncModality`, never called `DxgkDdiCommitVidPn`, and put the desktop on the Basic Display
-  adapter's no-EDID output, also with a Direct3D 11 device working and with the display configuration database made
-  again; LogonUI, rendering on this adapter, crashed in a loop and the screen stayed black. The VidPN is valid now
-  ("Display" above): the driver supports every VidPN dxgkrnl asks about and Windows records a 1024 x 768
-  configuration for the monitor, but dxgkrnl still calls no `DxgkDdiCommitVidPn` and keeps the desktop on Basic
-  Display, also with the database deleted before the boot. On a second such boot dxgkrnl called no VidPN DDI at all.
-  LogonUI still crashes: its shared render targets fail in DXVK, which shares an image only through
-  `VK_KHR_external_memory_win32`, and Venus on Windows does not offer it (`umd/README.md`).
+- The desktop on this adapter. The driver supports every VidPN dxgkrnl asks about; dxgkrnl pins the host's size
+  (2880 x 1800 on a Retina Mac, as viogpudo gets) and commits none: at boot, and when `SetDisplayConfig` asks for this
+  adapter's path alone (validated, then `ERROR_GEN_FAILURE`), CDD's device on this adapter fails first. Its first
+  context has virtual addressing and no DMA buffer, and dxgkrnl logs "Couldn't allocate a contiguous buffer for the
+  DMA buffer"; every DMA packet here also logs "The root page directory is not set", and `DxgkDdiSetRootPageTable`
+  does nothing yet. CDD then draws on Basic Render, and the desktop stays on the Basic Display adapter's no-EDID
+  output. A 64 KiB DMA buffer for such contexts made dxgmms2 fault at install (bug check 0x3B), so the GPU virtual
+  address space of a kernel client comes first (2026-11-18). viogpudo has no such device: CDD draws for it on Basic
+  Render.
 - `SupportPerEngineTDR` stays off: with it dxgkrnl refuses to start the adapter.
 - A D3D9 DDI. D3D9 apps get D3D9On12 only when they ask for it themselves, and only once the desktop is on this
   adapter (above): D3D9 and `Direct3DCreate9On12` list only the adapters that drive a display.
