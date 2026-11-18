@@ -374,6 +374,13 @@ static HRESULT umd_allocate12(const struct umd_device *dev, HANDLE hRTDevice, D3
                 (unsigned long)hr);
         return hr;
     }
+    static LONG logged;
+    if (allocate.hResource == NULL && InterlockedExchange(&logged, 1) == 0)
+    {
+        umd_log("allocate: the core layer's pfnAllocateCb took hResource NULL, %u allocation(s), handle 0x%x",
+                (unsigned)allocate.NumAllocations,
+                (unsigned)allocate.pAllocationInfo[0].hAllocation);
+    }
     umd_d3d12_allocate_results(&allocate, venus);
     return hr;
 }
