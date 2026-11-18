@@ -114,8 +114,6 @@ VioGpu3dAdapter::VioGpu3dAdapter(_In_ DEVICE_OBJECT *pPhysicalDeviceObject)
     InitializeListHead(&m_PresentWork);
     KeInitializeEvent(&m_PresentEvent, SynchronizationEvent, FALSE);
     KeInitializeEvent(&m_PresentIdle, NotificationEvent, TRUE);
-    m_pPageTables = NULL;
-    m_PageTablesPA.QuadPart = 0;
     m_NextFence = 0;
     KeInitializeSpinLock(&m_NodeLock);
     for (UINT node = 0; node < VIOGPU3D_NODE_COUNT; node++)
@@ -469,7 +467,7 @@ NTSTATUS VioGpu3dAdapter::QuerySegment4(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQu
         return STATUS_BUFFER_TOO_SMALL;
     }
     DXGK_QUERYSEGMENTOUT4 *pOut = (DXGK_QUERYSEGMENTOUT4 *)pQuery->pOutputData;
-    const UINT count = 2;
+    const UINT count = 1;
     // The counting pass gives only NbSegment.
     if (pOut->NbSegment == 0)
     {
@@ -493,20 +491,10 @@ NTSTATUS VioGpu3dAdapter::QuerySegment4(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQu
     pAperture->Flags.Aperture = TRUE;
     pAperture->Flags.CacheCoherent = TRUE;
     pAperture->Flags.DirectFlip = TRUE;
-    // Apart from the page tables' range, as viogpu3d of pull request 943 placed it.
+    // Where viogpu3d of pull request 943 placed it.
     pAperture->BaseAddress.QuadPart = 0xC0000000;
     pAperture->Size = (SIZE_T)VIOGPU3D_APERTURE_SIZE;
     pAperture->CommitLimit = (SIZE_T)VIOGPU3D_APERTURE_SIZE;
-
-    DXGK_SEGMENTDESCRIPTOR4 *pTables = (DXGK_SEGMENTDESCRIPTOR4 *)(pOut->pSegmentDescriptor + stride);
-    pTables->Flags.Aperture = FALSE;
-    pTables->Flags.PopulatedFromSystemMemory = TRUE;
-    pTables->Flags.CpuVisible = TRUE;
-    pTables->Flags.CacheCoherent = TRUE;
-    pTables->BaseAddress.QuadPart = 0;
-    pTables->CpuTranslatedAddress = m_PageTablesPA;
-    pTables->Size = VIOGPU3D_PT_SEGMENT_SIZE;
-    pTables->SystemMemoryEndAddress = VIOGPU3D_PT_SEGMENT_SIZE;
     return STATUS_SUCCESS;
 }
 
@@ -583,17 +571,30 @@ NTSTATUS VioGpu3dAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *
             }
         case DXGKQAITYPE_PAGETABLELEVELDESC:
             {
-                if (pQueryAdapterInfo->OutputDataSize < sizeof(DXGK_PAGE_TABLE_LEVEL_DESC))
+                if (pQueryAdapterInfo->InputDataSize < sizeof(UINT) || pQueryAdapterInfo->pInputData == NULL ||
+                    pQueryAdapterInfo->OutputDataSize < sizeof(DXGK_PAGE_TABLE_LEVEL_DESC))
                 {
                     return STATUS_BUFFER_TOO_SMALL;
                 }
+                const UINT level = *(const UINT *)pQueryAdapterInfo->pInputData;
+                if (level >= VIOGPU3D_PT_LEVELS)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
                 DXGK_PAGE_TABLE_LEVEL_DESC *pLevel = (DXGK_PAGE_TABLE_LEVEL_DESC *)pQueryAdapterInfo->pOutputData;
                 RtlZeroMemory(pLevel, sizeof(*pLevel));
-                pLevel->PageTableIndexBitCount = VIOGPU3D_PT_INDEX_BITS;
-                pLevel->PageTableSegmentId = VIOGPU3D_SEGMENT_PAGE_TABLES;
-                pLevel->PagingProcessPageTableSegmentId = VIOGPU3D_SEGMENT_PAGE_TABLES;
-                pLevel->PageTableSizeInBytes = VIOGPU3D_PT_ENTRIES * sizeof(DXGK_PTE);
+                pLevel->PageTableIndexBitCount = level == VIOGPU3D_PT_LEVELS - 1 ? VIOGPU3D_PT_ROOT_INDEX_BITS
+                                                                                 : VIOGPU3D_PT_INDEX_BITS;
+                pLevel->PageTableSegmentId = VIOGPU3D_SEGMENT_SYSTEM;
+                pLevel->PagingProcessPageTableSegmentId = VIOGPU3D_SEGMENT_SYSTEM;
+                pLevel->PageTableSizeInBytes = PAGE_SIZE;
                 pLevel->PageTableAlignmentInBytes = 0;
+                DbgPrint(TRACE_LEVEL_INFORMATION,
+                         ("page table level %u: %u index bits, segment %u, %u bytes\n",
+                          level,
+                          pLevel->PageTableIndexBitCount,
+                          pLevel->PageTableSegmentId,
+                          pLevel->PageTableSizeInBytes));
                 return STATUS_SUCCESS;
             }
         case DXGKQAITYPE_PHYSICALADAPTERCAPS:
@@ -982,18 +983,6 @@ NTSTATUS VioGpu3dAdapter::HWInit(PCM_RESOURCE_LIST pResList)
 
     QueryCapsets();
 
-    // The page tables live here: VidMm writes them through the CPU, and a virtio GPU never walks them.
-    PHYSICAL_ADDRESS low = {}, high, boundary = {};
-    high.QuadPart = (LONGLONG)-1;
-    m_pPageTables = MmAllocateContiguousMemorySpecifyCache(VIOGPU3D_PT_SEGMENT_SIZE, low, high, boundary, MmCached);
-    if (m_pPageTables == NULL)
-    {
-        DbgPrint(TRACE_LEVEL_FATAL, ("%s no contiguous memory for the page tables\n", __FUNCTION__));
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-    RtlZeroMemory(m_pPageTables, VIOGPU3D_PT_SEGMENT_SIZE);
-    m_PageTablesPA = MmGetPhysicalAddress(m_pPageTables);
-
     // Venus needs blobs, contexts of a capability set, and the host-visible region where blobs are mapped.
     UINT shmBar = 0;
     ULONGLONG shmOffset = 0, shmLength = 0;
@@ -1044,11 +1033,6 @@ NTSTATUS VioGpu3dAdapter::HWClose(void)
     StopWorkThread();
     frameSegment.Close();
     m_HostVisible.Close();
-    if (m_pPageTables != NULL)
-    {
-        MmFreeContiguousMemory(m_pPageTables);
-        m_pPageTables = NULL;
-    }
     return STATUS_SUCCESS;
 }
 

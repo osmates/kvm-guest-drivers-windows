@@ -36,34 +36,36 @@
 
 // Engines. The Venus ICD of Mesa's Windows work opens one virtual context a ring on the ring nodes, or, built for
 // hardware queues, one on the Venus node.
-#define VIOGPU3D_NODE_COUNT          64
-#define VIOGPU3D_NODE_SYSTEM         0
-#define VIOGPU3D_NODE_VENUS          1
-#define VIOGPU3D_NODE_PAGING         2
-#define VIOGPU3D_NODE_FIRST_RING     3
-#define VIOGPU3D_RING_COUNT          64
+#define VIOGPU3D_NODE_COUNT         64
+#define VIOGPU3D_NODE_SYSTEM        0
+#define VIOGPU3D_NODE_VENUS         1
+#define VIOGPU3D_NODE_PAGING        2
+#define VIOGPU3D_NODE_FIRST_RING    3
+#define VIOGPU3D_RING_COUNT         64
 
-// Segments, numbered from 1: system memory the device reaches through backing entries, and the page tables.
-#define VIOGPU3D_SEGMENT_APERTURE    1
-#define VIOGPU3D_SEGMENT_PAGE_TABLES 2
-#define VIOGPU3D_APERTURE_SIZE       (1ull << 30)
+// The one segment: system memory the device reaches through backing entries. Segment 0 is the implicit system memory
+// segment VidMm enumerates itself.
+#define VIOGPU3D_SEGMENT_SYSTEM     0
+#define VIOGPU3D_SEGMENT_APERTURE   1
+#define VIOGPU3D_APERTURE_SIZE      (1ull << 30)
 
-// GPU virtual addresses: two levels of 1024 entries over 4 KiB pages, 32 bits in all, written by the CPU. A virtio
-// GPU reads no GPU virtual address; the tables exist because VidMm keeps the WDDM 2.0 model only with them.
-#define VIOGPU3D_VA_BITS             32
-#define VIOGPU3D_PT_LEVELS           2
-#define VIOGPU3D_PT_INDEX_BITS       10
-#define VIOGPU3D_PT_ENTRIES          (1u << VIOGPU3D_PT_INDEX_BITS)
-#define VIOGPU3D_PT_SEGMENT_SIZE     (16u << 20)
+// GPU virtual addresses: 32 bits over 4 KiB pages, written by the CPU, in tables of one page in system memory (a table
+// there may not pass 4 KiB): two levels of 256 entries and a root of 16. A virtio GPU reads no GPU virtual address; the
+// tables exist because VidMm keeps the WDDM 2.0 model only with them.
+#define VIOGPU3D_VA_BITS            32
+#define VIOGPU3D_PT_LEVELS          3
+#define VIOGPU3D_PT_INDEX_BITS      8
+#define VIOGPU3D_PT_ROOT_INDEX_BITS (VIOGPU3D_VA_BITS - 12 - (VIOGPU3D_PT_LEVELS - 1) * VIOGPU3D_PT_INDEX_BITS)
+#define VIOGPU3D_PT_ENTRIES         (PAGE_SIZE / sizeof(DXGK_PTE))
 
-#define VIOGPU3D_PAGING_BUFFER_SIZE  (16u * PAGE_SIZE)
-#define VIOGPU3D_DMA_BUFFER_SIZE     (64u * 1024)
+#define VIOGPU3D_PAGING_BUFFER_SIZE (16u * PAGE_SIZE)
+#define VIOGPU3D_DMA_BUFFER_SIZE    (64u * 1024)
 
 // The largest display: 16,777,216 pixels, 64 MiB at 4 bytes, so 5120 x 2880 fits.
-#define VIOGPU3D_MAX_DISPLAY_PIXELS  (16u * 1024 * 1024)
-#define VIOGPU3D_MAX_DISPLAY_SIDE    8184
+#define VIOGPU3D_MAX_DISPLAY_PIXELS (16u * 1024 * 1024)
+#define VIOGPU3D_MAX_DISPLAY_SIDE   8184
 
-#define VIOGPU3D_TAG                 '3dGV'
+#define VIOGPU3D_TAG                '3dGV'
 
 class VioGpu3dAdapter;
 class VioGpu3dDevice;
@@ -601,10 +603,6 @@ class VioGpu3dAdapter final : IVioGpuPCI
     KEVENT m_PresentIdle;
     VIOGPU3D_CAPSET m_Capsets[VIRTIO_GPU_MAX_CAPSET_ID + 1];
     UINT64 m_CapsetMask;
-
-    // The page tables' segment: contiguous memory, as VidMm writes page tables through the CPU.
-    PVOID m_pPageTables;
-    PHYSICAL_ADDRESS m_PageTablesPA;
 
     KSPIN_LOCK m_NodeLock;
     VIOGPU3D_NODE_STATE m_Nodes[VIOGPU3D_NODE_COUNT];

@@ -718,7 +718,7 @@ NTSTATUS APIENTRY VioGpu3dDestroyProcess(_In_ CONST HANDLE hAdapter, _In_ CONST 
     return STATUS_SUCCESS;
 }
 
-// The root table is a whole number of pages of the page table segment.
+// The root table is a whole number of pages of system memory.
 SIZE_T APIENTRY VioGpu3dGetRootPageTableSize(_In_ CONST HANDLE hAdapter, _Inout_ DXGKARG_GETROOTPAGETABLESIZE *pArgs)
 {
     PAGED_CODE();
