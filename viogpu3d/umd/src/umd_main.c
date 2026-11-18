@@ -27,9 +27,54 @@ HMODULE umd_module(void)
     return umd_self;
 }
 
+static INIT_ONCE umd_log_once = INIT_ONCE_STATIC_INIT;
+static HANDLE umd_log_handle = INVALID_HANDLE_VALUE;
+
+// LogonUI and DWM run in a session no debug-output collector can reach, so VIOGPU3D_UMD_LOG, set machine-wide, names a
+// folder that gets one file per process.
+static BOOL CALLBACK umd_log_open(PINIT_ONCE once, PVOID parameter, PVOID *context)
+{
+    char folder[MAX_PATH];
+    char exe[MAX_PATH];
+    char path[MAX_PATH];
+    (void)once;
+    (void)parameter;
+    (void)context;
+    DWORD length = GetEnvironmentVariableA("VIOGPU3D_UMD_LOG", folder, sizeof(folder));
+    if (length == 0 || length >= sizeof(folder))
+    {
+        return TRUE;
+    }
+    length = GetModuleFileNameA(NULL, exe, sizeof(exe));
+    if (length == 0 || length >= sizeof(exe))
+    {
+        return TRUE;
+    }
+    const char *name = strrchr(exe, '\\');
+    name = name != NULL ? name + 1 : exe;
+    int written = snprintf(path, sizeof(path), "%s\\%s-%lu.log", folder, name, (unsigned long)GetCurrentProcessId());
+    if (written > 0 && written < (int)sizeof(path))
+    {
+        umd_log_handle = CreateFileA(path,
+                                     FILE_APPEND_DATA,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                     NULL,
+                                     OPEN_ALWAYS,
+                                     FILE_ATTRIBUTE_NORMAL,
+                                     NULL);
+    }
+    return TRUE;
+}
+
 void umd_log_line(const char *line)
 {
     OutputDebugStringA(line);
+    InitOnceExecuteOnce(&umd_log_once, umd_log_open, NULL, NULL);
+    if (umd_log_handle != INVALID_HANDLE_VALUE)
+    {
+        DWORD written;
+        WriteFile(umd_log_handle, line, (DWORD)strlen(line), &written, NULL);
+    }
 }
 
 void umd_log(const char *format, ...)
