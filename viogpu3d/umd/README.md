@@ -16,8 +16,9 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
 - Compiled and linked for Windows on Arm with llvm-mingw through `Tools/build-macos.sh --d3d-umd`, for aarch64,
   arm64ec and i686, in the Win11 and the Win10 package; vkd3d-proton for ARM64X and i686.
 - Run in a Windows 11 guest (2026-11-18): Direct3D 11 and 12 devices on Venus in ARM64, x64 and x86 processes, and
-  a Direct3D 11 draw into a texture that reads back right in all three; no present and no Direct3D 12 draw yet. See
-  "Measured in Windows" below.
+  a Direct3D 11 draw into a texture that reads back right in all three; with OSMates' next KosmicKrisp a Direct3D 12
+  draw too, LogonUI's shared textures, a sign-in, and presents of both APIs on a desktop that is still Basic Display's.
+  See "Measured in Windows" below.
 - The platform-free parts have unit tests that run on macOS: `sh viogpu3d/umd/tests/run-host-tests.sh`.
 - The build checks the package with `tests/check-package.sh`.
 
@@ -50,10 +51,12 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
 - Shared textures and display primaries: while DXVK makes one, its memory allocation carries
   `VkD3DDDICreateResourceMESA`, so Venus makes the blob through `pfnAllocateCb` for the runtime's resource (with
   `Primary` and the source of a primary), and the driver keeps the kernel allocation the runtime returns for the
-  present. Primaries are `HOST3D` blobs in a format the kernel driver scans out. Every shared texture with one level,
-  layer and sample is linear: a host that shares Venus memory as host memory, as OSMates' does, binds only linear
-  images to it. The texture's record (`VIOGPU3D_SURFACE`, `shared/viogpu3d_uapi.h`) follows the blob request in the
-  allocation's private data, for the process that opens it; its layout is the same in 32-bit and 64-bit processes.
+  present. DXVK makes that allocation dedicated and exportable whether or not Venus offers
+  `VK_KHR_external_memory_win32`: the runtime, not a Win32 handle, shares the resource ("DXVK" below). Primaries
+  are `HOST3D` blobs in a format the kernel driver scans out. Every shared texture with one level, layer and sample
+  is linear: a host that shares Venus memory as host memory, as OSMates' does, binds only linear images to it. The
+  texture's record (`VIOGPU3D_SURFACE`, `shared/viogpu3d_uapi.h`) follows the blob request in the allocation's
+  private data, for the process that opens it; its layout is the same in 32-bit and 64-bit processes.
 - `OpenResource` reads the record from the opened allocation and imports the blob with `VkD3DDDIOpenResourceMESA`,
   linear when its maker made it so. The kernel driver's shared primary and GDI textures carry the same record, as
   linear blobs of its own Venus context, and open the same way. Its shadow and staging surfaces are guest memory with
@@ -143,7 +146,16 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
   with linear scanout textures, and GDI interop, keyed mutexes and NT handle sharing built out under the option, so
   the driver imports no `D3DKMT*` function. A fourth, in the umd build's extension provider: it asks for
   `VK_EXT_image_drm_format_modifier` only on a device that lists it (Venus on a Mac host does not, and the device
-  then failed to create). A build without the `umd` option is unchanged by them.
+  then failed to create). A fifth: a umd build shares an image on a device without `VK_KHR_external_memory_win32` all
+  the same, with its dedicated, exportable allocation, since above the driver the runtime shares the resource, not a
+  Win32 handle (Venus offers the extension only on a host with `VK_EXT_external_memory_dma_buf`; a Mac host has none).
+  It still chains the KMT handle types into the image and its allocation, and for an open
+  `VkImportMemoryWin32HandleInfoKHR` with a placeholder handle, which is outside Vulkan's valid usage on such a device
+  (`VUID-VkImageCreateInfo-pNext-00990`, `VUID-VkExportMemoryAllocateInfo-handleTypes-00656`). It works because
+  Venus's Windows path takes them: it rewrites the handle types to its renderer's (none on a Mac host), makes or opens
+  the blob of an allocation by the `VkD3DDDI*MESA` struct it carries, and takes an allocation with
+  `VkImportMemoryWin32HandleInfoKHR` as an import (`vn_device_memory.c`, `vn_image.c`). The driver finds those
+  allocations by the same structs (`src/umd_vk_chain.c`). A build without the `umd` option is unchanged by them.
 - The build runs DXVK's meson three times on that copy: aarch64-w64-mingw32, arm64ec-w64-mingw32 and
   i686-w64-mingw32. ARM64EC gets the CPU family `aarch64`: its code is ARM64 code, and DXVK's own ARM64EC paths key on
   `__arm64ec__`.
@@ -278,13 +290,18 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
 - Shared Direct3D 11 textures (LogonUI's render targets, a swapchain's buffers): the driver makes them linear, and
   OSMates' KosmicKrisp refuses linear images with color attachment usage, so DXVK fails them ("Cannot create
   texture"); `kk: Allow linear 2D color attachments` (the same day, not in OSMates' pin yet) takes them, and on the
-  host a draw, a blend and a blit into a linear 2D image read back right with it. Then DXVK does not share them: it
-  shares an image only through `VK_KHR_external_memory_win32`, which Venus on Windows does not offer, so no kernel
-  allocation reaches the runtime's resource and another process cannot open it.
+  host a draw, a blend and a blit into a linear 2D image read back right with it. Then DXVK did not share them: it
+  shared an image only through `VK_KHR_external_memory_win32`, which Venus on Windows offers only on a host with
+  `VK_EXT_external_memory_dma_buf` (a Mac host has none), so no kernel allocation reached the runtime's resource and
+  LogonUI crashed (`0xc000027b` in `Windows.UI.Xaml.dll`, 20 times in a boot's first minute). DXVK's umd build now
+  shares them without the extension ("DXVK" above): no LogonUI crash, and a sign-in works, with DWM, Explorer and the
+  shell on this driver.
 - Direct3D 12 presents, on a host before main `d3303957`: `CreateSwapChainForHwnd` failed (`E_OUTOFMEMORY` on the
   desktop, `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE` in session 0). That host refused the back buffers' blob
   (`RESOURCE_CREATE_BLOB`, `ERR_UNSPEC`), so `pfnAllocateCb` with `hResource` set failed with `E_FAIL`. Main
-  `d3303957` pins virglrenderer `b6e26840`, which makes these blobs; presents on it are not measured yet.
+  `d3303957` pins virglrenderer `b6e26840`, which makes these blobs: with it, the KosmicKrisp above and DXVK's sharing,
+  a Direct3D 11 and a Direct3D 12 triangle each present 600 frames in an 800 x 600 flip swapchain on the signed-in
+  desktop and read their centre pixel back right. The desktop is Basic Display's, so the Mac's screen stays black.
 - Direct3D 11: `D3D11CreateDevice` makes a DXVK device on Venus in ARM64, x64 and x86 processes, at feature level
   12_0 when asked for it, and a triangle drawn into a texture 120 times reads back as drawn. Before, DXVK's
   `vkCreateDevice` failed with `VK_ERROR_EXTENSION_NOT_PRESENT`: DXVK's umd extension provider added
@@ -298,18 +315,16 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
 - Windows keeps the desktop on a software display adapter, whose render side DXGI lists as "Microsoft Basic Render
   Driver" without `DXGI_ADAPTER_FLAG_SOFTWARE`: an app that takes the first adapter that is not software can render
   with WARP. D3D9 lists only the adapters that drive a display, so neither D3D9 nor `Direct3DCreate9On12` finds this
-  one. With Direct3D 11 working, LogonUI loads this driver and the screen stays black (`../README.md`).
+  one (2026-11-18: `d3d9-clear` finds only Basic Render, both for a HAL device and through D3D9On12). LogonUI, DWM
+  and the shell load this driver and a sign-in works, and the Mac's screen stays black (`../README.md`).
 
 ## Unproven, and not done
 
-- Presents, both APIs: a run on a host with virglrenderer `b6e26840`, which makes the blobs of swapchain buffers and
-  shared surfaces (`../README.md`), once the desktop is on this adapter; then that DWM composes, and the rest of this
-  list. No Windows 10 guest has had the Win10 package.
+- Presents, both APIs, on this adapter's scanout: they need the desktop on this adapter (`../README.md`); then that
+  DWM composes them on it, and the rest of this list. No Windows 10 guest has had the Win10 package.
 - Direct3D 12 draws wait for OSMates' KosmicKrisp pin to have `fcanonicalize` (above).
-- Shared Direct3D 11 textures and primaries: OSMates' KosmicKrisp pin with `kk: Allow linear 2D color attachments`;
-  Venus on Windows exporting image memory as `OPAQUE_WIN32_KMT` through `VK_KHR_external_memory_win32`, or DXVK
-  making a shared image's allocation with `VkD3DDDICreateResourceMESA` without it; the kernel driver's flip of a
-  `HOST3D` primary.
+- Shared Direct3D 11 textures and primaries: OSMates' KosmicKrisp pin with `kk: Allow linear 2D color attachments`
+  (measured with a host app that has it, not with main's); the kernel driver's flip of a `HOST3D` primary.
 - Not measured: whether Venus must keep the WSI extensions it implements itself (`VK_KHR_incremental_present`,
   `VK_EXT_hdr_metadata`, the swapchain maintenance ones) from the host when an app enables them without
   `VK_KHR_swapchain`. DXVK did so in session 0 in an earlier run; in later session 0 runs it enabled
@@ -324,7 +339,7 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
   `GetDC`, `AcquireSync`, `ReleaseSync` or `CreateSharedHandle`, it fails with `DXGI_ERROR_UNSUPPORTED`, `E_FAIL` or
   `E_NOTIMPL`, as `OpenSharedResource` and `OpenSharedResource1` already did.
 - No D3D9 DDI.
-- Direct3D 12: a swapchain on a host that makes its buffers' blobs (above); that the queue gate keeps app fences and
+- Direct3D 12: a swapchain on this adapter's scanout (above); that the queue gate keeps app fences and
   presents GPU-true; DWM composing Direct3D 12 back buffers through their companions; the cache folder rule; that the
   fork's build without D3DKMT changes nothing an app sees through the runtime (no call of the runtime's reaches the
   parts it built out).
