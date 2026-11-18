@@ -300,6 +300,15 @@ class VioGpu3dDevice
     {
         return m_NumRings;
     }
+    // GDI's or the system's device: a kernel client, with no user-mode driver to fill its DMA buffers.
+    BOOLEAN IsKernelClient() const
+    {
+        return m_KernelClient;
+    }
+    void SetKernelClient(BOOLEAN kernelClient)
+    {
+        m_KernelClient = kernelClient;
+    }
     PEPROCESS GetProcess() const
     {
         return m_Process;
@@ -315,6 +324,7 @@ class VioGpu3dDevice
     UINT m_CtxId;
     UINT m_CapsetId;
     UINT m_NumRings;
+    BOOLEAN m_KernelClient;
 };
 
 class VioGpu3dContext
@@ -333,14 +343,15 @@ class VioGpu3dContext
     {
         return m_Node;
     }
-    BOOLEAN IsVirtual() const
-    {
-        return m_Flags.VirtualAddressing;
-    }
     void SetRootPageTable(const D3DGPU_PHYSICAL_ADDRESS &address, UINT entries)
     {
         m_RootPageTable = address;
         m_RootPageTableEntries = entries;
+    }
+    // CDD's blts and fills come through Present, which needs a DMA buffer, also on a context with virtual addressing.
+    BOOLEAN HasDmaBuffer() const
+    {
+        return !m_Flags.VirtualAddressing || m_Flags.GdiContext || m_pDevice->IsKernelClient();
     }
 
   private:

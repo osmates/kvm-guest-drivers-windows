@@ -44,6 +44,7 @@ VioGpu3dDevice::VioGpu3dDevice(VioGpu3dAdapter *adapter)
     m_CtxId = 0;
     m_CapsetId = 0;
     m_NumRings = 0;
+    m_KernelClient = FALSE;
 }
 
 VioGpu3dDevice::~VioGpu3dDevice()
@@ -252,6 +253,13 @@ NTSTATUS VioGpu3dContext::SubmitVirtual(_In_ const DXGKARG_SUBMITCOMMANDVIRTUAL 
     }
 
     const UCHAR *p = (const UCHAR *)pSubmit->pDmaBufferPrivateData;
+    // CDD's blts and fills: the work thread ends the buffer once it ran them.
+    if (HasDmaBuffer() && pSubmit->Flags.Present && !pSubmit->Flags.Flip && p != NULL &&
+        pSubmit->DmaBufferPrivateDataSize >= sizeof(VIOGPU3D_PRESENT_OP) &&
+        pAdapter->QueuePresentOps(p, pSubmit->DmaBufferPrivateDataSize, pDma))
+    {
+        return STATUS_SUCCESS;
+    }
     // The buffer is as large as CreateContext asked; the user-mode driver filled this much of it.
     UINT size = pSubmit->DmaBufferPrivateDataSize;
     if (pSubmit->DmaBufferUmdPrivateDataSize != 0)

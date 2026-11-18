@@ -17,8 +17,9 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
   arm64ec and i686, in the Win11 and the Win10 package; vkd3d-proton for ARM64X and i686.
 - Run in a Windows 11 guest (2026-11-18): Direct3D 11 and 12 devices on Venus in ARM64, x64 and x86 processes, and
   a Direct3D 11 draw into a texture that reads back right in all three; with OSMates' next KosmicKrisp a Direct3D 12
-  draw too, LogonUI's shared textures, a sign-in, and presents of both APIs on a desktop that is still Basic Display's.
-  See "Measured in Windows" below.
+  draw too, LogonUI's shared textures, a sign-in, and from 2026-11-19 the desktop on this adapter: DWM composes on
+  Venus, both APIs present in windows that show on the Mac's screen, and D3D9On12 makes a HAL device. See "Measured in
+  Windows" below.
 - The platform-free parts have unit tests that run on macOS: `sh viogpu3d/umd/tests/run-host-tests.sh`.
 - The build checks the package with `tests/check-package.sh`.
 
@@ -133,9 +134,8 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
   `GetResourceTiling`, each format carries vkd3d-proton's `TILED` bit, and each mapping change is ordered as a batch
   is: after the other queues' earlier batches, before the app's later fences.
 - D3D9: the D3D9 slot names this DLL, which has no `OpenAdapter`. No documented key turns D3D9 over to D3D9On12 for
-  a driver, so D3D9 apps get D3D9On12 on this driver only when they call `Direct3DCreate9On12` themselves, and only
-  once the desktop is on this adapter: D3D9 and `Direct3DCreate9On12` list only the adapters that drive a display
-  (`../README.md`, "Not done yet").
+  a driver, so D3D9 apps get D3D9On12 on this driver only when they call `Direct3DCreate9On12` themselves; D3D9 and
+  `Direct3DCreate9On12` list only the adapters that drive a display, which this one does since 2026-11-19.
 
 ## DXVK
 
@@ -312,19 +312,24 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
   `CreateSynchronizationObject2`, `DestroySynchronizationObject`, `SignalFromGpu2`, `WaitFromGpu`, `SignalFromCpu`,
   `WaitFromCpu`, `SubmitCommand`, `Escape`, `CreatePagingQueue` and `MakeResident`, and no `Allocate` or
   `Deallocate`; the core layer has `Allocate`, `Deallocate` and `CreateContextVirtual`.
-- Windows keeps the desktop on a software display adapter, whose render side DXGI lists as "Microsoft Basic Render
-  Driver" without `DXGI_ADAPTER_FLAG_SOFTWARE`: an app that takes the first adapter that is not software can render
-  with WARP. D3D9 lists only the adapters that drive a display, so neither D3D9 nor `Direct3DCreate9On12` finds this
-  one (2026-11-18: `d3d9-clear` finds only Basic Render, both for a HAL device and through D3D9On12). LogonUI, DWM
-  and the shell load this driver and a sign-in works, and the Mac's screen stays black (`../README.md`).
+- Until 2026-11-18 Windows kept the desktop on a software display adapter, whose render side DXGI lists as "Microsoft
+  Basic Render Driver" without `DXGI_ADAPTER_FLAG_SOFTWARE`: an app that takes the first adapter that is not software
+  can render with WARP. D3D9 lists only the adapters that drive a display, so neither D3D9 nor `Direct3DCreate9On12`
+  found this one (`d3d9-clear` found only Basic Render), and the Mac's screen stayed black (`../README.md`).
+- The desktop on this adapter (2026-11-19, with the kernel driver's DMA buffers for CDD and its flips by allocation,
+  `../README.md`): Windows sets the host's 2880 x 1800 on it at boot, the lock screen and the signed-in desktop show
+  on the Mac's screen, and DWM, Explorer and the shell run on this driver. A Direct3D 11 and a Direct3D 12 triangle
+  each present 600 frames in an 800 x 600 flip swapchain window (12.3 s and 16.4 s, against 23.9 s and 45.2 s on
+  Basic Display's desktop), read their centre pixel back right, and show on the Mac's screen. D3D9 lists this adapter
+  first: a plain HAL device fails with `D3DERR_NOTAVAILABLE` (no D3D9 DDI), and `Direct3DCreate9On12` makes a HAL
+  device whose clear reads back right.
 
 ## Unproven, and not done
 
-- Presents, both APIs, on this adapter's scanout: they need the desktop on this adapter (`../README.md`); then that
-  DWM composes them on it, and the rest of this list. No Windows 10 guest has had the Win10 package.
+- No Windows 10 guest has had the Win10 package.
 - Direct3D 12 draws wait for OSMates' KosmicKrisp pin to have `fcanonicalize` (above).
 - Shared Direct3D 11 textures and primaries: OSMates' KosmicKrisp pin with `kk: Allow linear 2D color attachments`
-  (measured with a host app that has it, not with main's); the kernel driver's flip of a `HOST3D` primary.
+  (measured with a host app that has it, not with main's).
 - Not measured: whether Venus must keep the WSI extensions it implements itself (`VK_KHR_incremental_present`,
   `VK_EXT_hdr_metadata`, the swapchain maintenance ones) from the host when an app enables them without
   `VK_KHR_swapchain`. DXVK did so in session 0 in an earlier run; in later session 0 runs it enabled
@@ -339,10 +344,10 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
   `GetDC`, `AcquireSync`, `ReleaseSync` or `CreateSharedHandle`, it fails with `DXGI_ERROR_UNSUPPORTED`, `E_FAIL` or
   `E_NOTIMPL`, as `OpenSharedResource` and `OpenSharedResource1` already did.
 - No D3D9 DDI.
-- Direct3D 12: a swapchain on this adapter's scanout (above); that the queue gate keeps app fences and
-  presents GPU-true; DWM composing Direct3D 12 back buffers through their companions; the cache folder rule; that the
-  fork's build without D3DKMT changes nothing an app sees through the runtime (no call of the runtime's reaches the
-  parts it built out).
+- Direct3D 12: that the queue gate keeps app fences and presents GPU-true (one screenshot of the triangle shows two
+  frames, split across a row); DWM composing Direct3D 12 back buffers through their companions; the cache folder rule;
+  that the fork's build without D3DKMT changes nothing an app sees through the runtime (no call of the runtime's reaches
+  the parts it built out).
 - Direct3D 12 gaps known now: app waits on CPU-signalled fences are kernel packets the driver never sees (Triton has
   the same gap); opened shared resources (`OpenHeapAndResource`) are refused, as in Triton; a Direct3D 12 primary
   scans out source 0.

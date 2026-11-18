@@ -1105,10 +1105,9 @@ NTSTATUS VioGpu3dAdapter::Present(_In_ VioGpu3dContext *pContext, _Inout_ DXGKAR
     {
         return STATUS_SUCCESS;
     }
-    // CreateContext gives a context with virtual addressing no DMA buffer to carry the ops.
-    if (pContext == NULL || pContext->IsVirtual())
+    if (pContext == NULL || !pContext->HasDmaBuffer())
     {
-        DbgPrint(TRACE_LEVEL_WARNING, ("%s blt or fill on a context with virtual addressing refused\n", __FUNCTION__));
+        DbgPrint(TRACE_LEVEL_WARNING, ("%s blt or fill on a context without a DMA buffer refused\n", __FUNCTION__));
         return STATUS_NOT_SUPPORTED;
     }
     if (!(flags.Blt || flags.ColorFill) || flags.SrcColorKey || flags.DstColorKey || flags.LinearToSrgb ||
@@ -1165,6 +1164,11 @@ NTSTATUS VioGpu3dAdapter::Present(_In_ VioGpu3dContext *pContext, _Inout_ DXGKAR
     }
     pPresent->pDmaBufferPrivateData = (PUCHAR)pPresent->pDmaBufferPrivateData + sizeof(*pOp);
     pPresent->DmaBufferPrivateDataSize -= sizeof(*pOp);
+    // A virtual submission has no end offset: an op without the magic ends the list.
+    if (pPresent->DmaBufferPrivateDataSize >= sizeof(VIOGPU3D_PRESENT_OP))
+    {
+        ((VIOGPU3D_PRESENT_OP *)pPresent->pDmaBufferPrivateData)->Magic = 0;
+    }
     // The buffer itself only marks that it carries something; the work is in its private data.
     *(UINT *)pPresent->pDmaBuffer = VIOGPU3D_PRESENT_MAGIC;
     pPresent->pDmaBuffer = (PUCHAR)pPresent->pDmaBuffer + sizeof(UINT);
@@ -1210,9 +1214,22 @@ void VioGpu3dAdapter::RunPresentOp(_In_ const VIOGPU3D_PRESENT_OP *pOp)
 
     VIOGPU3D_CPU_VIEW dst, src;
     RtlZeroMemory(&src, sizeof(src));
-    if (!pOp->Destination->GetCpuView(&dst) || (pOp->Kind == VIOGPU3D_PRESENT_BLT && !pOp->Source->GetCpuView(&src)))
+    BOOLEAN dstView = pOp->Destination->GetCpuView(&dst);
+    BOOLEAN srcView = pOp->Kind != VIOGPU3D_PRESENT_BLT || pOp->Source->GetCpuView(&src);
+    if (!dstView || !srcView)
     {
-        DbgPrint(TRACE_LEVEL_ERROR, ("%s a surface of the present has no CPU view\n", __FUNCTION__));
+        const VioGpu3dAllocation *pBad = dstView ? pOp->Source : pOp->Destination;
+        DbgPrint(TRACE_LEVEL_ERROR,
+                 ("%s the %s has no CPU view: resource %u, blob %u, kernel %u, primary %u, %ux%u, pitch %u\n",
+                  __FUNCTION__,
+                  dstView ? "source" : "destination",
+                  pBad->GetResId(),
+                  (UINT)pBad->IsBlob(),
+                  (UINT)pBad->IsKernelSurface(),
+                  (UINT)pBad->IsPrimary(),
+                  pBad->GetWidth(),
+                  pBad->GetHeight(),
+                  pBad->GetPitch()));
         return;
     }
     BOOLEAN cached = dst.Cached && (pOp->Kind != VIOGPU3D_PRESENT_BLT || src.Cached);
@@ -1625,9 +1642,9 @@ NTSTATUS VioGpu3dAdapter::SubmitCommand(_In_ CONST DXGKARG_SUBMITCOMMAND *pSubmi
     // The work thread ends a buffer that carries blts or fills, once it ran them.
     UINT start = pSubmitCommand->DmaBufferPrivateDataSubmissionStartOffset;
     UINT end = pSubmitCommand->DmaBufferPrivateDataSubmissionEndOffset;
-    if (pContext != NULL && !pContext->IsVirtual() && pSubmitCommand->Flags.Present && !pSubmitCommand->Flags.Paging &&
-        !pSubmitCommand->Flags.Flip && pSubmitCommand->pDmaBufferPrivateData != NULL && start < end &&
-        end <= pSubmitCommand->DmaBufferPrivateDataSize &&
+    if (pContext != NULL && pContext->HasDmaBuffer() && pSubmitCommand->Flags.Present &&
+        !pSubmitCommand->Flags.Paging && !pSubmitCommand->Flags.Flip && pSubmitCommand->pDmaBufferPrivateData != NULL &&
+        start < end && end <= pSubmitCommand->DmaBufferPrivateDataSize &&
         QueuePresentOps((const UCHAR *)pSubmitCommand->pDmaBufferPrivateData + start, end - start, pDma))
     {
         return STATUS_SUCCESS;

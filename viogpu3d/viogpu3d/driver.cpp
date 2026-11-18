@@ -276,6 +276,7 @@ NTSTATUS APIENTRY VioGpu3dCreateDevice(_In_ CONST HANDLE hAdapter, _Inout_ DXGKA
     {
         return STATUS_NO_MEMORY;
     }
+    pDevice->SetKernelClient(pCreateDevice->Flags.SystemDevice || pCreateDevice->Flags.GdiDevice);
     DbgPrint(TRACE_LEVEL_INFORMATION, ("device: flags 0x%X\n", pCreateDevice->Flags.Value));
     pCreateDevice->hDevice = pDevice;
     return STATUS_SUCCESS;
@@ -397,22 +398,28 @@ NTSTATUS APIENTRY VioGpu3dCreateContext(_In_ CONST HANDLE hDevice, _Inout_ DXGKA
         return STATUS_NO_MEMORY;
     }
     pCreateContext->hContext = pContext;
-    DbgPrint(TRACE_LEVEL_INFORMATION,
-             ("context: node %u, flags 0x%X\n", pCreateContext->NodeOrdinal, pCreateContext->Flags.Value));
     DXGK_CONTEXTINFO *pInfo = &pCreateContext->ContextInfo;
     RtlZeroMemory(pInfo, sizeof(*pInfo));
-    if (pCreateContext->Flags.VirtualAddressing)
-    {
-        pInfo->DmaBufferPrivateDataSize = VIRTIO_WDDM_MAX_SUBMIT_COMMAND_VIRTUAL_SIZE;
-    }
-    else
+    DbgPrint(TRACE_LEVEL_INFORMATION,
+             ("context: node %u, flags 0x%X, %s\n",
+              pCreateContext->NodeOrdinal,
+              pCreateContext->Flags.Value,
+              pContext->HasDmaBuffer() ? "with a DMA buffer for presents" : "no DMA buffer"));
+    if (pContext->HasDmaBuffer())
     {
         pInfo->DmaBufferSize = VIOGPU3D_DMA_BUFFER_SIZE;
         // The blts and fills of Present.
-        pInfo->DmaBufferPrivateDataSize = VIOGPU3D_PRESENT_PRIVATE_SIZE;
-        pInfo->DmaBufferSegmentSet = 0;
+        pInfo->DmaBufferPrivateDataSize = pCreateContext->Flags.VirtualAddressing ? VIRTIO_WDDM_MAX_SUBMIT_COMMAND_VIRTUAL_SIZE
+                                                                                  : VIOGPU3D_PRESENT_PRIVATE_SIZE;
+        // A virtual context's DMA buffer gets a GPU virtual address; only aperture segments may hold one.
+        pInfo->DmaBufferSegmentSet = pCreateContext->Flags.VirtualAddressing ? 1u << (VIOGPU3D_SEGMENT_APERTURE - 1)
+                                                                             : 0;
         pInfo->AllocationListSize = pCreateContext->Flags.GdiContext ? DXGK_ALLOCATION_LIST_SIZE_GDICONTEXT : 64;
         pInfo->PatchLocationListSize = 64;
+    }
+    else
+    {
+        pInfo->DmaBufferPrivateDataSize = VIRTIO_WDDM_MAX_SUBMIT_COMMAND_VIRTUAL_SIZE;
     }
     pInfo->PagingCompanionNodeId = VIOGPU3D_NODE_PAGING;
     return STATUS_SUCCESS;

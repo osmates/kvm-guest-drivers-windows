@@ -10,9 +10,10 @@ display-only driver in `viogpu` stays as it is.
 - Run in a Windows 11 guest on OSMates' accelerated GPU (2026-11-18): the driver starts (problem code 0) and dxgkrnl
   reports the adapter as render and display, WDDM 2.0, GpuMmu. Direct3D 11 and 12 devices run on it through DXVK,
   vkd3d-proton and Venus in ARM64, x64 and x86 processes, and a Direct3D 11 draw into a texture reads back right. With
-  a host that has OSMates' next KosmicKrisp (osmates/mesa `kk-linear-color-attachment`), a sign-in works and both APIs
-  draw and present. The desktop is not on this adapter yet, so the Mac's screen shows none of it (below, "Not done
-  yet").
+  a host that has OSMates' next KosmicKrisp (osmates/mesa `kk-linear-color-attachment`), Windows puts the desktop on
+  this adapter at the host's 2880 x 1800 from boot on (2026-11-19): the lock screen and the signed-in desktop show on
+  the Mac's screen, DWM composes on Venus, a Direct3D 11 and a Direct3D 12 window present 600 frames each, and D3D9
+  apps that ask for D3D9On12 get a HAL device on this adapter.
 - dxgkrnl fails the adapter after a successful start, code 43, when its software key has no `UserModeDriverName`
   (`Microsoft-Windows-DxgKrnl-Admin` event 549, "Object Name not found", `StartAdapter_AddAdapterFailed`). So the
   package always carries the Direct3D driver, and the build refuses to pack it without the Direct3D driver's DLLs,
@@ -40,7 +41,9 @@ display-only driver in `viogpu` stays as it is.
 - WDDM 2.0 with GPU virtual addressing (GpuMmu). The page tables are written by the CPU, in the implicit system
   memory segment (segment 0), one page each, as `DXGK_PAGE_TABLE_LEVEL_DESC` documents for that segment: two levels
   of 256 entries and a root of 16 over 32 bits. The device never reads a GPU virtual address: it addresses memory by
-  resource. The driver allocates no contiguous memory for them, so a start never fails for want of it.
+  resource. The driver allocates no contiguous memory for them, so a start never fails for want of it. VidMm makes
+  and fills them through `UPDATE_PAGE_TABLE`, which logs each update; `DxgkDdiSetRootPageTable` keeps the root it
+  gets on the context and logs it, though no boot has called it yet (2026-11-19).
 - One segment: a 1 GiB aperture of system memory.
 - 64 nodes: 0 for the system, 1 for Venus, 2 for paging, 3 to 63 for Venus rings 0 to 60. Mesa's Venus ICD opens
   one virtual context a ring on nodes 3 to 63. Every node reports `GpuMmuSupported`: without it dxgkrnl refuses every
@@ -87,10 +90,16 @@ merge request 38731): the same tags and layouts.
 - Shadow and staging surfaces, and CPU-visible GDI staging surfaces: guest memory the CPU draws in, with no host
   resource. A process cannot open them as textures.
 - Other GDI surfaces are refused: the driver has no GDI hardware acceleration.
-- `DxgkDdiPresent` with blt or color fill, on contexts without virtual addressing (CDD's): the work thread copies or
-  fills the rows with the CPU when the DMA buffer runs, between those surfaces and blobs whose rows Venus described,
-  then flushes the rectangle if the blob is on screen. No stretch, color keys, rotation or overlapping blts in one
-  surface. A context with virtual addressing has no DMA buffer for them, so its blts and fills are refused.
+- `DxgkDdiPresent` with blt or color fill, on the contexts of GDI and of kernel clients (CDD's, the system's): the
+  work thread copies or fills the rows with the CPU when the DMA buffer runs, between those surfaces and blobs whose
+  rows Venus described, then flushes the rectangle if the blob is on screen. No stretch, color keys, rotation or
+  overlapping blts in one surface. These contexts have virtual addressing, as every context here, and a 64 KiB DMA
+  buffer in the aperture segment: VidMm maps a virtual context's DMA buffer into the process's GPU virtual address
+  space, which takes an allocation in a segment. Without a DMA buffer CDD's device on this adapter failed in its first
+  context ("Couldn't allocate a contiguous buffer for the DMA buffer"), and one in contiguous memory
+  (`DmaBufferSegmentSet` 0) made dxgmms2 fault in `AddDmaBufferToPool` (bug check 0x3B). Their blts and fills arrive
+  in `DxgkDdiSubmitCommandVirtual`. The contexts of user-mode drivers get no DMA buffer, and their blts and fills are
+  refused.
 
 ## Display
 
@@ -109,29 +118,27 @@ merge request 38731): the same tags and layouts.
 - Modes come from `GET_DISPLAY_INFO` and the EDID, read by data block as viogpudo now does. The host's display size
   is the custom mode from start on; the framebuffer memory is then sized for the largest mode, and a later, larger
   display waits for the next start.
-- A flip shows a 3D resource with `SET_SCANOUT` or a blob with `SET_SCANOUT_BLOB`. No hardware cursor yet.
+- A flip shows a 3D resource with `SET_SCANOUT` or a blob with `SET_SCANOUT_BLOB`, by the allocation: dxgkrnl gives
+  these primaries segment 0 and address 0. No hardware cursor yet.
 
 ## Not done yet
 
-- Presents on the Mac's screen. With virglrenderer `b6e26840` (main `575ca684`'s pin) and KosmicKrisp from
-  osmates/mesa `2b0fd564`, which adds `kk: Allow linear 2D color attachments` and `kk: Emit fcanonicalize` to main's
-  Mesa pin, a Direct3D 11 and a Direct3D 12 triangle present 600 frames each on the signed-in desktop (2026-11-18),
-  which is still the Basic Display adapter's, so nothing reaches this adapter's scanout (below).
-- Direct3D 12 graphics pipelines need a KosmicKrisp that prints `fcanonicalize` in MSL; OSMates' pin does not yet
-  (`umd/README.md`).
-- The desktop on this adapter. The driver supports every VidPN dxgkrnl asks about; dxgkrnl pins the host's size
-  (2880 x 1800 on a Retina Mac, as viogpudo gets) and commits none: at boot, and when `SetDisplayConfig` asks for this
-  adapter's path alone (validated, then `ERROR_GEN_FAILURE`), CDD's device on this adapter fails first. Its first
-  context has virtual addressing and no DMA buffer, and dxgkrnl logs "Couldn't allocate a contiguous buffer for the
-  DMA buffer"; every DMA packet here also logs "The root page directory is not set", and `DxgkDdiSetRootPageTable`
-  does nothing yet. CDD then draws on Basic Render, and the desktop stays on the Basic Display adapter's no-EDID
-  output. A 64 KiB DMA buffer for such contexts made dxgmms2 fault at install (bug check 0x3B), so the GPU virtual
-  address space of a kernel client comes first (2026-11-18). viogpudo has no such device: CDD draws for it on Basic
-  Render.
+- The desktop and presents need virglrenderer `b6e26840` (main `575ca684`'s pin) and KosmicKrisp from osmates/mesa
+  `2b0fd564`, which adds `kk: Allow linear 2D color attachments` and `kk: Emit fcanonicalize` to main's Mesa pin;
+  Direct3D 12 graphics pipelines need the second (`umd/README.md`). Measured with a host app that has both, not with
+  main's.
+- At boot CDD's first four blts on this adapter fail ("present between surfaces it cannot copy"), and dxgkrnl calls
+  the `STATUS_NOT_SUPPORTED` they return an invalid status for `DxgkDdiPresent` (2026-11-19). The desktop shows from
+  DWM's first flip on.
+- dxgkrnl logs "The root page directory is not set" on the DMA packets of processes that map no GPU virtual address
+  (Venus maps none), and refuses Venus's hardware queue context while the driver reports WDDM 2.0 ("the driver WDDM
+  version is < 2.5"); Venus then opens a context per ring.
+- Basic Display keeps a second output to the right of this adapter's: Windows extends the desktop onto it.
 - `SupportPerEngineTDR` stays off: with it dxgkrnl refuses to start the adapter.
-- A D3D9 DDI. D3D9 apps get D3D9On12 only when they ask for it themselves, and only once the desktop is on this
-  adapter (above): D3D9 and `Direct3DCreate9On12` list only the adapters that drive a display.
-- A run of the surfaces above and the present's blts in Windows, with another process importing them through Venus.
+- A D3D9 DDI. D3D9 lists this adapter now that it drives the display, and a HAL device fails with
+  `D3DERR_NOTAVAILABLE`; apps that call `Direct3DCreate9On12` get a HAL device through D3D9On12 (2026-11-19).
+- Another process opening the surfaces above through Venus, and CDD's blts into the primary once DWM runs: not
+  measured on their own; the screen shows DWM's flips of its own buffers.
 - Hardware queues and the GPU's own scheduling.
 - After a power transition the host has lost its contexts and resources; the driver does not report a lost device
   yet.

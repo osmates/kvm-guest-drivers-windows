@@ -2343,7 +2343,8 @@ void VioGpuVidPN::Flip()
 
     if (InterlockedExchange(&m_shouldFlip, 0))
     {
-        if (m_sourceAddress.QuadPart != 0 && m_sourceRes != NULL)
+        // The device shows a resource, not an address: PrimaryAddress is 0 for a primary outside every segment.
+        if (m_sourceRes != NULL)
         {
             ShowAllocation(0, m_sourceRes);
         }
@@ -2429,10 +2430,12 @@ NTSTATUS VioGpuVidPN::SetVidPnSourceAddress(const DXGKARG_SETVIDPNSOURCEADDRESS 
     if (reinterpret_cast<VioGpu3dAllocation *>(pSetVidPnSourceAddress->hAllocation) != m_sourceRes)
     {
         DbgPrint(TRACE_LEVEL_INFORMATION,
-                 ("vidpn source address: source %u, allocation %p, flags 0x%X\n",
+                 ("vidpn source address: source %u, allocation %p, flags 0x%X, segment %u, address 0x%llx\n",
                   pSetVidPnSourceAddress->VidPnSourceId,
                   pSetVidPnSourceAddress->hAllocation,
-                  pSetVidPnSourceAddress->Flags.Value));
+                  pSetVidPnSourceAddress->Flags.Value,
+                  pSetVidPnSourceAddress->PrimarySegment,
+                  pSetVidPnSourceAddress->PrimaryAddress.QuadPart));
     }
     m_sourceAddress = pSetVidPnSourceAddress->PrimaryAddress;
     m_sourceRes = reinterpret_cast<VioGpu3dAllocation *>(pSetVidPnSourceAddress->hAllocation);
