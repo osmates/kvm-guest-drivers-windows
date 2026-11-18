@@ -606,9 +606,12 @@ NTSTATUS APIENTRY VioGpu3dControlInterrupt(_In_ CONST HANDLE hAdapter,
                                            _In_ BOOLEAN EnableInterrupt)
 {
     PAGED_CODE();
-    UNREFERENCED_PARAMETER(hAdapter);
-    UNREFERENCED_PARAMETER(InterruptType);
-    UNREFERENCED_PARAMETER(EnableInterrupt);
+    DbgPrint(TRACE_LEVEL_INFORMATION,
+             ("control interrupt: type %d %s\n", InterruptType, EnableInterrupt ? "on" : "off"));
+    if (InterruptType == DXGK_INTERRUPT_CRTC_VSYNC)
+    {
+        Adapter(hAdapter)->vidpn->EnableVsync(EnableInterrupt);
+    }
     return STATUS_SUCCESS;
 }
 

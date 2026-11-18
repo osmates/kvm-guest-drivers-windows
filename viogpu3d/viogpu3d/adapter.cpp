@@ -426,6 +426,10 @@ NTSTATUS VioGpu3dAdapter::QueryChildStatus(_Inout_ DXGK_CHILD_STATUS *pChildStat
         case StatusConnection:
             // Scanout 0 is the one monitor this driver drives so far.
             pChildStatus->HotPlug.Connected = IsDriverActive() && pChildStatus->ChildUid == 0;
+            DbgPrint(TRACE_LEVEL_INFORMATION,
+                     ("child status: child %u %s\n",
+                      pChildStatus->ChildUid,
+                      pChildStatus->HotPlug.Connected ? "connected" : "not connected"));
             return STATUS_SUCCESS;
         case StatusRotation:
             return STATUS_INVALID_PARAMETER;

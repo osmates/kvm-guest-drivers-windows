@@ -38,6 +38,106 @@
 
 PAGED_CODE_SEG_BEGIN
 
+// Without a kernel debugger, these lines are the only record of what dxgkrnl asked and what the driver answered.
+void VioGpuVidPN::LogVidPn(const char *pWhat, D3DKMDT_HVIDPN hVidPn) const
+{
+    PAGED_CODE();
+
+    const DXGKRNL_INTERFACE *pDxgk = m_pDxgkInterface;
+    CONST DXGK_VIDPN_INTERFACE *pVidPn = NULL;
+    D3DKMDT_HVIDPNTOPOLOGY hTopology = 0;
+    CONST DXGK_VIDPNTOPOLOGY_INTERFACE *pTopology = NULL;
+    SIZE_T NumPaths = 0;
+    NTSTATUS Status = pDxgk->DxgkCbQueryVidPnInterface(hVidPn, DXGK_VIDPN_INTERFACE_VERSION_V1, &pVidPn);
+    if (NT_SUCCESS(Status))
+    {
+        Status = pVidPn->pfnGetTopology(hVidPn, &hTopology, &pTopology);
+    }
+    if (NT_SUCCESS(Status))
+    {
+        Status = pTopology->pfnGetNumPaths(hTopology, &NumPaths);
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        DbgPrint(TRACE_LEVEL_INFORMATION, ("vidpn %s: unreadable, 0x%X\n", pWhat, Status));
+        return;
+    }
+    DbgPrint(TRACE_LEVEL_INFORMATION, ("vidpn %s: %Iu paths\n", pWhat, NumPaths));
+
+    CONST D3DKMDT_VIDPN_PRESENT_PATH *pPath = NULL;
+    Status = pTopology->pfnAcquireFirstPathInfo(hTopology, &pPath);
+    while (Status == STATUS_SUCCESS && pPath != NULL)
+    {
+        SIZE_T NumSource = 0, NumTarget = 0;
+        UINT SrcW = 0, SrcH = 0, SrcFormat = 0, TgtW = 0, TgtH = 0, ActW = 0, ActH = 0, VNum = 0, VDen = 0;
+        BOOLEAN SrcPinned = FALSE, TgtPinned = FALSE;
+
+        D3DKMDT_HVIDPNSOURCEMODESET hSourceSet = 0;
+        CONST DXGK_VIDPNSOURCEMODESET_INTERFACE *pSourceSet = NULL;
+        if (NT_SUCCESS(pVidPn->pfnAcquireSourceModeSet(hVidPn, pPath->VidPnSourceId, &hSourceSet, &pSourceSet)))
+        {
+            pSourceSet->pfnGetNumModes(hSourceSet, &NumSource);
+            CONST D3DKMDT_VIDPN_SOURCE_MODE *pMode = NULL;
+            if (NT_SUCCESS(pSourceSet->pfnAcquirePinnedModeInfo(hSourceSet, &pMode)) && pMode != NULL)
+            {
+                SrcPinned = TRUE;
+                SrcW = pMode->Format.Graphics.PrimSurfSize.cx;
+                SrcH = pMode->Format.Graphics.PrimSurfSize.cy;
+                SrcFormat = pMode->Format.Graphics.PixelFormat;
+                pSourceSet->pfnReleaseModeInfo(hSourceSet, pMode);
+            }
+            pVidPn->pfnReleaseSourceModeSet(hVidPn, hSourceSet);
+        }
+
+        D3DKMDT_HVIDPNTARGETMODESET hTargetSet = 0;
+        CONST DXGK_VIDPNTARGETMODESET_INTERFACE *pTargetSet = NULL;
+        if (NT_SUCCESS(pVidPn->pfnAcquireTargetModeSet(hVidPn, pPath->VidPnTargetId, &hTargetSet, &pTargetSet)))
+        {
+            pTargetSet->pfnGetNumModes(hTargetSet, &NumTarget);
+            CONST D3DKMDT_VIDPN_TARGET_MODE *pMode = NULL;
+            if (NT_SUCCESS(pTargetSet->pfnAcquirePinnedModeInfo(hTargetSet, &pMode)) && pMode != NULL)
+            {
+                TgtPinned = TRUE;
+                TgtW = pMode->VideoSignalInfo.TotalSize.cx;
+                TgtH = pMode->VideoSignalInfo.TotalSize.cy;
+                ActW = pMode->VideoSignalInfo.ActiveSize.cx;
+                ActH = pMode->VideoSignalInfo.ActiveSize.cy;
+                VNum = pMode->VideoSignalInfo.VSyncFreq.Numerator;
+                VDen = pMode->VideoSignalInfo.VSyncFreq.Denominator;
+                pTargetSet->pfnReleaseModeInfo(hTargetSet, pMode);
+            }
+            pVidPn->pfnReleaseTargetModeSet(hVidPn, hTargetSet);
+        }
+
+        DbgPrint(TRACE_LEVEL_INFORMATION,
+                 ("vidpn %s: path %u->%u scaling %d rotation %d, source %s %ux%u format %u of %Iu modes, target %s "
+                  "%ux%u active %ux%u vsync %u/%u of %Iu modes\n",
+                  pWhat,
+                  pPath->VidPnSourceId,
+                  pPath->VidPnTargetId,
+                  pPath->ContentTransformation.Scaling,
+                  pPath->ContentTransformation.Rotation,
+                  SrcPinned ? "pinned" : "unpinned",
+                  SrcW,
+                  SrcH,
+                  SrcFormat,
+                  NumSource,
+                  TgtPinned ? "pinned" : "unpinned",
+                  TgtW,
+                  TgtH,
+                  ActW,
+                  ActH,
+                  VNum,
+                  VDen,
+                  NumTarget));
+
+        CONST D3DKMDT_VIDPN_PRESENT_PATH *pNext = NULL;
+        Status = pTopology->pfnAcquireNextPathInfo(hTopology, pPath, &pNext);
+        pTopology->pfnReleasePathInfo(hTopology, pPath);
+        pPath = pNext;
+    }
+}
+
 VioGpuVidPN::VioGpuVidPN(VioGpu3dAdapter *adapter)
 {
     PAGED_CODE();
@@ -227,10 +327,21 @@ void VioGpuVidPN::Powerdown()
 NTSTATUS VioGpuVidPN::CommitVidPn(_In_ CONST DXGKARG_COMMITVIDPN *CONST pCommitVidPn)
 {
     PAGED_CODE();
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
 
     VIOGPU_ASSERT(pCommitVidPn != NULL);
     VIOGPU_ASSERT(pCommitVidPn->AffectedVidPnSourceId < MAX_VIEWS);
+
+    DbgPrint(TRACE_LEVEL_INFORMATION,
+             ("vidpn commit: source %u, monitor checks %d, primary %p, power transition %u, powered off %u\n",
+              pCommitVidPn->AffectedVidPnSourceId,
+              pCommitVidPn->MonitorConnectivityChecks,
+              pCommitVidPn->hPrimaryAllocation,
+              pCommitVidPn->Flags.PathPowerTransition,
+              pCommitVidPn->Flags.PathPoweredOff));
+    if (pCommitVidPn->hFunctionalVidPn != 0)
+    {
+        LogVidPn("commit", pCommitVidPn->hFunctionalVidPn);
+    }
 
     NTSTATUS Status;
     SIZE_T NumPaths = 0;
@@ -421,7 +532,7 @@ CommitVidPnExit:
         NT_ASSERT(NT_SUCCESS(TempStatus));
     }
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    DbgPrint(TRACE_LEVEL_INFORMATION, ("vidpn commit: 0x%X\n", Status));
 
     return Status;
 }
@@ -570,11 +681,17 @@ VioGpuVidPN::UpdateActiveVidPnPresentPath(_In_ CONST DXGKARG_UPDATEACTIVEVIDPNPR
 {
     PAGED_CODE();
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
-
     VIOGPU_ASSERT(pUpdateActiveVidPnPresentPath != NULL);
 
-    NTSTATUS Status = IsVidPnPathFieldsValid(&(pUpdateActiveVidPnPresentPath->VidPnPresentPathInfo));
+    CONST D3DKMDT_VIDPN_PRESENT_PATH *pPath = &pUpdateActiveVidPnPresentPath->VidPnPresentPathInfo;
+    NTSTATUS Status = IsVidPnPathFieldsValid(pPath);
+    DbgPrint(TRACE_LEVEL_INFORMATION,
+             ("vidpn update active path: %u->%u scaling %d rotation %d, 0x%X\n",
+              pPath->VidPnSourceId,
+              pPath->VidPnTargetId,
+              pPath->ContentTransformation.Scaling,
+              pPath->ContentTransformation.Rotation,
+              Status));
     if (!NT_SUCCESS(Status))
     {
         return Status;
@@ -583,8 +700,6 @@ VioGpuVidPN::UpdateActiveVidPnPresentPath(_In_ CONST DXGKARG_UPDATEACTIVEVIDPNPR
     m_CurrentModes[pUpdateActiveVidPnPresentPath->VidPnPresentPathInfo.VidPnSourceId].Flags.FullscreenPresent = TRUE;
 
     m_CurrentModes[pUpdateActiveVidPnPresentPath->VidPnPresentPathInfo.VidPnSourceId].Rotation = pUpdateActiveVidPnPresentPath->VidPnPresentPathInfo.ContentTransformation.Rotation;
-
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
 
     return STATUS_SUCCESS;
 }
@@ -829,42 +944,43 @@ NTSTATUS VioGpuVidPN::IsSupportedVidPn(_Inout_ DXGKARG_ISSUPPORTEDVIDPN *pIsSupp
 {
     PAGED_CODE();
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
-
     VIOGPU_ASSERT(pIsSupportedVidPn != NULL);
 
     if (pIsSupportedVidPn->hDesiredVidPn == 0)
     {
         pIsSupportedVidPn->IsVidPnSupported = TRUE;
+        DbgPrint(TRACE_LEVEL_INFORMATION, ("vidpn is supported: the empty VidPN, yes\n"));
         return STATUS_SUCCESS;
     }
 
-    pIsSupportedVidPn->IsVidPnSupported = FALSE;
-    // DbgPrint(TRACE_LEVEL_ERROR, ("vidpn %d\n", pIsSupportedVidPn->hDesiredVidPn));
+    LogVidPn("is supported", pIsSupportedVidPn->hDesiredVidPn);
+    NTSTATUS Status = CheckVidPn(pIsSupportedVidPn->hDesiredVidPn, &pIsSupportedVidPn->IsVidPnSupported);
+    DbgPrint(TRACE_LEVEL_INFORMATION,
+             ("vidpn is supported: %s, 0x%X\n", pIsSupportedVidPn->IsVidPnSupported ? "yes" : "no", Status));
+    return Status;
+}
+
+NTSTATUS VioGpuVidPN::CheckVidPn(D3DKMDT_HVIDPN hVidPn, BOOLEAN *pSupported) const
+{
+    PAGED_CODE();
+
+    *pSupported = FALSE;
     CONST DXGK_VIDPN_INTERFACE *pVidPnInterface;
-    NTSTATUS Status = m_pDxgkInterface->DxgkCbQueryVidPnInterface(pIsSupportedVidPn->hDesiredVidPn,
+    NTSTATUS Status = m_pDxgkInterface->DxgkCbQueryVidPnInterface(hVidPn,
                                                                   DXGK_VIDPN_INTERFACE_VERSION_V1,
                                                                   &pVidPnInterface);
     if (!NT_SUCCESS(Status))
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("DxgkCbQueryVidPnInterface failed with Status = 0x%X, hDesiredVidPn = %llu\n",
-                  Status,
-                  LONG_PTR(pIsSupportedVidPn->hDesiredVidPn)));
+        DbgPrint(TRACE_LEVEL_ERROR, ("DxgkCbQueryVidPnInterface failed with Status = 0x%X\n", Status));
         return Status;
     }
 
     D3DKMDT_HVIDPNTOPOLOGY hVidPnTopology;
     CONST DXGK_VIDPNTOPOLOGY_INTERFACE *pVidPnTopologyInterface;
-    Status = pVidPnInterface->pfnGetTopology(pIsSupportedVidPn->hDesiredVidPn,
-                                             &hVidPnTopology,
-                                             &pVidPnTopologyInterface);
+    Status = pVidPnInterface->pfnGetTopology(hVidPn, &hVidPnTopology, &pVidPnTopologyInterface);
     if (!NT_SUCCESS(Status))
     {
-        DbgPrint(TRACE_LEVEL_ERROR,
-                 ("pfnGetTopology failed with Status = 0x%X, hDesiredVidPn = %llu\n",
-                  Status,
-                  LONG_PTR(pIsSupportedVidPn->hDesiredVidPn)));
+        DbgPrint(TRACE_LEVEL_ERROR, ("pfnGetTopology failed with Status = 0x%X\n", Status));
         return Status;
     }
 
@@ -879,10 +995,7 @@ NTSTATUS VioGpuVidPN::IsSupportedVidPn(_Inout_ DXGKARG_ISSUPPORTEDVIDPN *pIsSupp
         else if (!NT_SUCCESS(Status))
         {
             DbgPrint(TRACE_LEVEL_ERROR,
-                     ("pfnGetNumPathsFromSource failed with Status = 0x%X hVidPnTopology = %llu, SourceId = %llu",
-                      Status,
-                      LONG_PTR(hVidPnTopology),
-                      LONG_PTR(SourceId)));
+                     ("pfnGetNumPathsFromSource failed with Status = 0x%X, SourceId = %u\n", Status, SourceId));
             return Status;
         }
         else if (NumPathsFromSource > MAX_CHILDREN)
@@ -891,8 +1004,46 @@ NTSTATUS VioGpuVidPN::IsSupportedVidPn(_Inout_ DXGKARG_ISSUPPORTEDVIDPN *pIsSupp
         }
     }
 
-    pIsSupportedVidPn->IsVidPnSupported = TRUE;
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
+    // The scanout cannot scale: a path whose source and target are both pinned needs them the same size.
+    CONST D3DKMDT_VIDPN_PRESENT_PATH *pPath = NULL;
+    Status = pVidPnTopologyInterface->pfnAcquireFirstPathInfo(hVidPnTopology, &pPath);
+    while (Status == STATUS_SUCCESS && pPath != NULL)
+    {
+        D3DKMDT_2DREGION TargetSize = {};
+        BOOLEAN TargetPinned = FALSE;
+        BOOLEAN SameSize = TRUE;
+        if (NT_SUCCESS(PinnedTargetSize(pVidPnInterface, hVidPn, pPath->VidPnTargetId, &TargetSize, &TargetPinned)) &&
+            TargetPinned)
+        {
+            D3DKMDT_HVIDPNSOURCEMODESET hSet = 0;
+            CONST DXGK_VIDPNSOURCEMODESET_INTERFACE *pSet = NULL;
+            if (NT_SUCCESS(pVidPnInterface->pfnAcquireSourceModeSet(hVidPn, pPath->VidPnSourceId, &hSet, &pSet)))
+            {
+                CONST D3DKMDT_VIDPN_SOURCE_MODE *pMode = NULL;
+                if (NT_SUCCESS(pSet->pfnAcquirePinnedModeInfo(hSet, &pMode)) && pMode != NULL)
+                {
+                    SameSize = pMode->Format.Graphics.PrimSurfSize.cx == TargetSize.cx &&
+                               pMode->Format.Graphics.PrimSurfSize.cy == TargetSize.cy;
+                    pSet->pfnReleaseModeInfo(hSet, pMode);
+                }
+                pVidPnInterface->pfnReleaseSourceModeSet(hVidPn, hSet);
+            }
+        }
+        CONST D3DKMDT_VIDPN_PRESENT_PATH *pNext = NULL;
+        Status = pVidPnTopologyInterface->pfnAcquireNextPathInfo(hVidPnTopology, pPath, &pNext);
+        pVidPnTopologyInterface->pfnReleasePathInfo(hVidPnTopology, pPath);
+        pPath = pNext;
+        if (!SameSize)
+        {
+            if (pPath != NULL)
+            {
+                pVidPnTopologyInterface->pfnReleasePathInfo(hVidPnTopology, pPath);
+            }
+            return STATUS_SUCCESS;
+        }
+    }
+
+    *pSupported = TRUE;
     return STATUS_SUCCESS;
 }
 
@@ -901,7 +1052,7 @@ VioGpuVidPN::RecommendFunctionalVidPn(_In_ CONST DXGKARG_RECOMMENDFUNCTIONALVIDP
 {
     PAGED_CODE();
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
+    DbgPrint(TRACE_LEVEL_INFORMATION, ("vidpn recommend functional: none\n"));
 
     VIOGPU_ASSERT(pRecommendFunctionalVidPn == NULL);
 
@@ -912,7 +1063,7 @@ NTSTATUS VioGpuVidPN::RecommendVidPnTopology(_In_ CONST DXGKARG_RECOMMENDVIDPNTO
 {
     PAGED_CODE();
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<---> %s\n", __FUNCTION__));
+    DbgPrint(TRACE_LEVEL_INFORMATION, ("vidpn recommend topology: none\n"));
 
     VIOGPU_ASSERT(pRecommendVidPnTopology == NULL);
 
@@ -923,24 +1074,32 @@ NTSTATUS VioGpuVidPN::RecommendMonitorModes(_In_ CONST DXGKARG_RECOMMENDMONITORM
 {
     PAGED_CODE();
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
-
-    return AddSingleMonitorMode(pRecommendMonitorModes);
+    NTSTATUS Status = AddSingleMonitorMode(pRecommendMonitorModes);
+    SIZE_T NumModes = 0;
+    pRecommendMonitorModes->pMonitorSourceModeSetInterface->pfnGetNumModes(pRecommendMonitorModes->hMonitorSourceModeSet,
+                                                                           &NumModes);
+    DbgPrint(TRACE_LEVEL_INFORMATION,
+             ("vidpn recommend monitor modes: target %u, %Iu modes, 0x%X\n",
+              pRecommendMonitorModes->VideoPresentTargetId,
+              NumModes,
+              Status));
+    return Status;
 }
 
 NTSTATUS VioGpuVidPN::AddSingleSourceMode(_In_ CONST DXGK_VIDPNSOURCEMODESET_INTERFACE *pVidPnSourceModeSetInterface,
                                           D3DKMDT_HVIDPNSOURCEMODESET hVidPnSourceModeSet,
-                                          D3DDDI_VIDEO_PRESENT_SOURCE_ID SourceId)
+                                          _In_opt_ CONST D3DKMDT_2DREGION *pPinnedTargetSize)
 {
     PAGED_CODE();
-
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
-    UNREFERENCED_PARAMETER(SourceId);
 
     for (ULONG idx = 0; idx < GetModeCount(); ++idx)
     {
         D3DKMDT_VIDPN_SOURCE_MODE *pVidPnSourceModeInfo = NULL;
         PVIDEO_MODE_INFORMATION pModeInfo = &m_ModeInfo[idx];
+        if (!IsModeOfSize(pModeInfo, pPinnedTargetSize))
+        {
+            continue;
+        }
         NTSTATUS Status = pVidPnSourceModeSetInterface->pfnCreateNewModeInfo(hVidPnSourceModeSet,
                                                                              &pVidPnSourceModeInfo);
         if (!NT_SUCCESS(Status))
@@ -981,7 +1140,6 @@ NTSTATUS VioGpuVidPN::AddSingleSourceMode(_In_ CONST DXGK_VIDPNSOURCEMODESET_INT
         }
     }
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
     return STATUS_SUCCESS;
 }
 
@@ -989,45 +1147,44 @@ VOID VioGpuVidPN::BuildVideoSignalInfo(D3DKMDT_VIDEO_SIGNAL_INFO *pVideoSignalIn
 {
     PAGED_CODE();
 
+    // A virtual scanout has no blanking, so the rates follow from the visible size at 60 Hz.
+    ULONG Width = pModeInfo->VisScreenWidth;
+    ULONG Height = pModeInfo->VisScreenHeight;
     pVideoSignalInfo->VideoStandard = D3DKMDT_VSS_OTHER;
-    pVideoSignalInfo->TotalSize.cx = pModeInfo->VisScreenWidth;
-    pVideoSignalInfo->TotalSize.cy = pModeInfo->VisScreenHeight;
-
-#if 1
-    pVideoSignalInfo->VSyncFreq.Numerator = 148500000;
-    pVideoSignalInfo->VSyncFreq.Denominator = 2475000;
-    pVideoSignalInfo->HSyncFreq.Numerator = 67500;
+    pVideoSignalInfo->TotalSize.cx = Width;
+    pVideoSignalInfo->TotalSize.cy = Height;
+    pVideoSignalInfo->ActiveSize = pVideoSignalInfo->TotalSize;
+    pVideoSignalInfo->VSyncFreq.Numerator = VIOGPU3D_REFRESH_HZ;
+    pVideoSignalInfo->VSyncFreq.Denominator = 1;
+    pVideoSignalInfo->HSyncFreq.Numerator = VIOGPU3D_REFRESH_HZ * Height;
     pVideoSignalInfo->HSyncFreq.Denominator = 1;
-    pVideoSignalInfo->PixelRate = 148500000;
-#else
-
-    pVideoSignalInfo->VSyncFreq.Numerator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
-    pVideoSignalInfo->VSyncFreq.Denominator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
-    pVideoSignalInfo->HSyncFreq.Numerator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
-    pVideoSignalInfo->HSyncFreq.Denominator = D3DKMDT_FREQUENCY_NOTSPECIFIED;
-    pVideoSignalInfo->PixelRate = D3DKMDT_FREQUENCY_NOTSPECIFIED;
-#endif
+    pVideoSignalInfo->PixelRate = (SIZE_T)VIOGPU3D_REFRESH_HZ * Width * Height;
     pVideoSignalInfo->ScanLineOrdering = D3DDDI_VSSLO_PROGRESSIVE;
 }
 
 NTSTATUS VioGpuVidPN::AddSingleTargetMode(_In_ CONST DXGK_VIDPNTARGETMODESET_INTERFACE *pVidPnTargetModeSetInterface,
                                           D3DKMDT_HVIDPNTARGETMODESET hVidPnTargetModeSet,
-                                          _In_opt_ CONST D3DKMDT_VIDPN_SOURCE_MODE *pVidPnPinnedSourceModeInfo,
-                                          D3DDDI_VIDEO_PRESENT_SOURCE_ID SourceId)
+                                          _In_opt_ CONST D3DKMDT_VIDPN_SOURCE_MODE *pVidPnPinnedSourceModeInfo)
 {
     PAGED_CODE();
 
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
-    UNREFERENCED_PARAMETER(pVidPnPinnedSourceModeInfo);
-
-    D3DKMDT_VIDPN_TARGET_MODE *pVidPnTargetModeInfo = NULL;
-    NTSTATUS Status = STATUS_SUCCESS;
-
+    // The scanout shows the source as it is, so a pinned source allows only the target of its size.
+    CONST D3DKMDT_2DREGION *pPinnedSourceSize = NULL;
+    if (pVidPnPinnedSourceModeInfo != NULL)
+    {
+        pPinnedSourceSize = &pVidPnPinnedSourceModeInfo->Format.Graphics.PrimSurfSize;
+    }
+    PVIDEO_MODE_INFORMATION pCurrent = &m_ModeInfo[m_CurrentModeIndex];
     for (UINT ModeIndex = 0; ModeIndex < GetModeCount(); ++ModeIndex)
     {
-        PVIDEO_MODE_INFORMATION pModeInfo = &m_ModeInfo[SourceId];
-        pVidPnTargetModeInfo = NULL;
-        Status = pVidPnTargetModeSetInterface->pfnCreateNewModeInfo(hVidPnTargetModeSet, &pVidPnTargetModeInfo);
+        PVIDEO_MODE_INFORMATION pModeInfo = &m_ModeInfo[ModeIndex];
+        if (!IsModeOfSize(pModeInfo, pPinnedSourceSize))
+        {
+            continue;
+        }
+        D3DKMDT_VIDPN_TARGET_MODE *pVidPnTargetModeInfo = NULL;
+        NTSTATUS Status = pVidPnTargetModeSetInterface->pfnCreateNewModeInfo(hVidPnTargetModeSet,
+                                                                             &pVidPnTargetModeInfo);
         if (!NT_SUCCESS(Status))
         {
             DbgPrint(TRACE_LEVEL_ERROR,
@@ -1036,11 +1193,13 @@ NTSTATUS VioGpuVidPN::AddSingleTargetMode(_In_ CONST DXGK_VIDPNTARGETMODESET_INT
                       LONG_PTR(hVidPnTargetModeSet)));
             return Status;
         }
-        pVidPnTargetModeInfo->VideoSignalInfo.ActiveSize = pVidPnTargetModeInfo->VideoSignalInfo.TotalSize;
         BuildVideoSignalInfo(&pVidPnTargetModeInfo->VideoSignalInfo, pModeInfo);
-
-        pVidPnTargetModeInfo->Preference = D3DKMDT_MP_NOTPREFERRED; // TODO: another logic for prefferred mode. Maybe
-                                                                    // the pinned source mode
+        pVidPnTargetModeInfo->Preference = D3DKMDT_MP_NOTPREFERRED;
+        if (pModeInfo->VisScreenWidth == pCurrent->VisScreenWidth &&
+            pModeInfo->VisScreenHeight == pCurrent->VisScreenHeight)
+        {
+            pVidPnTargetModeInfo->Preference = D3DKMDT_MP_PREFERRED;
+        }
 
         Status = pVidPnTargetModeSetInterface->pfnAddMode(hVidPnTargetModeSet, pVidPnTargetModeInfo);
         if (!NT_SUCCESS(Status))
@@ -1059,8 +1218,12 @@ NTSTATUS VioGpuVidPN::AddSingleTargetMode(_In_ CONST DXGK_VIDPNTARGETMODESET_INT
             NT_ASSERT(NT_SUCCESS(Status));
         }
     }
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("<--- %s\n", __FUNCTION__));
     return STATUS_SUCCESS;
+}
+
+BOOLEAN VioGpuVidPN::IsModeOfSize(PVIDEO_MODE_INFORMATION pModeInfo, _In_opt_ CONST D3DKMDT_2DREGION *pSize)
+{
+    return pSize == NULL || (pModeInfo->VisScreenWidth == pSize->cx && pModeInfo->VisScreenHeight == pSize->cy);
 }
 
 NTSTATUS VioGpuVidPN::AddSingleMonitorMode(_In_ CONST DXGKARG_RECOMMENDMONITORMODES *CONST pRecommendMonitorModes)
@@ -1176,14 +1339,55 @@ NTSTATUS VioGpuVidPN::AddSingleMonitorMode(_In_ CONST DXGKARG_RECOMMENDMONITORMO
     return Status;
 }
 
+NTSTATUS VioGpuVidPN::PinnedTargetSize(_In_ CONST DXGK_VIDPN_INTERFACE *pVidPnInterface,
+                                       D3DKMDT_HVIDPN hVidPn,
+                                       D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId,
+                                       _Out_ D3DKMDT_2DREGION *pSize,
+                                       _Out_ BOOLEAN *pPinned) const
+{
+    PAGED_CODE();
+
+    *pPinned = FALSE;
+    D3DKMDT_HVIDPNTARGETMODESET hSet = 0;
+    CONST DXGK_VIDPNTARGETMODESET_INTERFACE *pSet = NULL;
+    NTSTATUS Status = pVidPnInterface->pfnAcquireTargetModeSet(hVidPn, TargetId, &hSet, &pSet);
+    if (!NT_SUCCESS(Status))
+    {
+        DbgPrint(TRACE_LEVEL_ERROR, ("pfnAcquireTargetModeSet failed with Status = 0x%X\n", Status));
+        return Status;
+    }
+    CONST D3DKMDT_VIDPN_TARGET_MODE *pMode = NULL;
+    Status = pSet->pfnAcquirePinnedModeInfo(hSet, &pMode);
+    if (NT_SUCCESS(Status) && pMode != NULL)
+    {
+        *pSize = pMode->VideoSignalInfo.ActiveSize;
+        *pPinned = TRUE;
+        pSet->pfnReleaseModeInfo(hSet, pMode);
+    }
+    pVidPnInterface->pfnReleaseTargetModeSet(hVidPn, hSet);
+    return NT_SUCCESS(Status) ? STATUS_SUCCESS : Status;
+}
+
 NTSTATUS VioGpuVidPN::EnumVidPnCofuncModality(_In_ CONST DXGKARG_ENUMVIDPNCOFUNCMODALITY *CONST pEnumCofuncModality)
 {
     PAGED_CODE();
 
-    // DbgBreakPoint();
-
     VIOGPU_ASSERT(pEnumCofuncModality != NULL);
-    DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s\n", __FUNCTION__));
+    DbgPrint(TRACE_LEVEL_INFORMATION,
+             ("vidpn cofunc: pivot type %d, source %u, target %u\n",
+              pEnumCofuncModality->EnumPivotType,
+              pEnumCofuncModality->EnumPivot.VidPnSourceId,
+              pEnumCofuncModality->EnumPivot.VidPnTargetId));
+    LogVidPn("cofunc in", pEnumCofuncModality->hConstrainingVidPn);
+    NTSTATUS Status = EnumCofuncModality(pEnumCofuncModality);
+    LogVidPn("cofunc out", pEnumCofuncModality->hConstrainingVidPn);
+    DbgPrint(TRACE_LEVEL_INFORMATION, ("vidpn cofunc: 0x%X\n", Status));
+    return Status;
+}
+
+NTSTATUS VioGpuVidPN::EnumCofuncModality(_In_ CONST DXGKARG_ENUMVIDPNCOFUNCMODALITY *CONST pEnumCofuncModality)
+{
+    PAGED_CODE();
 
     D3DKMDT_HVIDPNTOPOLOGY hVidPnTopology = 0;
     D3DKMDT_HVIDPNSOURCEMODESET hVidPnSourceModeSet = 0;
@@ -1233,6 +1437,18 @@ NTSTATUS VioGpuVidPN::EnumVidPnCofuncModality(_In_ CONST DXGKARG_ENUMVIDPNCOFUNC
 
     while (Status != STATUS_GRAPHICS_NO_MORE_ELEMENTS_IN_DATASET)
     {
+        D3DKMDT_2DREGION TargetSize = {};
+        BOOLEAN TargetPinned = FALSE;
+        Status = PinnedTargetSize(pVidPnInterface,
+                                  pEnumCofuncModality->hConstrainingVidPn,
+                                  pVidPnPresentPath->VidPnTargetId,
+                                  &TargetSize,
+                                  &TargetPinned);
+        if (!NT_SUCCESS(Status))
+        {
+            break;
+        }
+
         Status = pVidPnInterface->pfnAcquireSourceModeSet(pEnumCofuncModality->hConstrainingVidPn,
                                                           pVidPnPresentPath->VidPnSourceId,
                                                           &hVidPnSourceModeSet,
@@ -1296,7 +1512,7 @@ NTSTATUS VioGpuVidPN::EnumVidPnCofuncModality(_In_ CONST DXGKARG_ENUMVIDPNCOFUNC
                 {
                     Status = AddSingleSourceMode(pVidPnSourceModeSetInterface,
                                                  hVidPnSourceModeSet,
-                                                 pVidPnPresentPath->VidPnSourceId);
+                                                 TargetPinned ? &TargetSize : NULL);
                 }
 
                 if (!NT_SUCCESS(Status))
@@ -1388,8 +1604,7 @@ NTSTATUS VioGpuVidPN::EnumVidPnCofuncModality(_In_ CONST DXGKARG_ENUMVIDPNCOFUNC
 
                 Status = AddSingleTargetMode(pVidPnTargetModeSetInterface,
                                              hVidPnTargetModeSet,
-                                             pVidPnPinnedSourceModeInfo,
-                                             pVidPnPresentPath->VidPnSourceId);
+                                             pVidPnPinnedSourceModeInfo);
 
                 if (!NT_SUCCESS(Status))
                 {
@@ -1490,6 +1705,7 @@ NTSTATUS VioGpuVidPN::EnumVidPnCofuncModality(_In_ CONST DXGKARG_ENUMVIDPNCOFUNC
         {
             if (pVidPnPresentPath->ContentTransformation.Scaling == D3DKMDT_VPPS_UNPINNED)
             {
+                // Source and target modes are kept the same size, so centered is identity here.
                 RtlZeroMemory(&(LocalVidPnPresentPath.ContentTransformation.ScalingSupport),
                               sizeof(D3DKMDT_VIDPN_PRESENT_PATH_SCALING_SUPPORT));
                 LocalVidPnPresentPath.ContentTransformation.ScalingSupport.Identity = 1;
@@ -1498,16 +1714,15 @@ NTSTATUS VioGpuVidPN::EnumVidPnCofuncModality(_In_ CONST DXGKARG_ENUMVIDPNCOFUNC
             }
         }
 
-        if (!((pEnumCofuncModality->EnumPivotType != D3DKMDT_EPT_ROTATION) &&
+        if (!((pEnumCofuncModality->EnumPivotType == D3DKMDT_EPT_ROTATION) &&
               (pEnumCofuncModality->EnumPivot.VidPnSourceId == pVidPnPresentPath->VidPnSourceId) &&
               (pEnumCofuncModality->EnumPivot.VidPnTargetId == pVidPnPresentPath->VidPnTargetId)))
         {
             if (pVidPnPresentPath->ContentTransformation.Rotation == D3DKMDT_VPPR_UNPINNED)
             {
+                // Clearing the offset bits dxgkrnl set here bugchecks 0x113 (subtype 0x1C).
                 LocalVidPnPresentPath.ContentTransformation.RotationSupport.Identity = 1;
-                LocalVidPnPresentPath.ContentTransformation.RotationSupport.Rotate90 = 1;
-                LocalVidPnPresentPath.ContentTransformation.RotationSupport.Rotate180 = 0;
-                LocalVidPnPresentPath.ContentTransformation.RotationSupport.Rotate270 = 0;
+                LocalVidPnPresentPath.ContentTransformation.RotationSupport.Offset0 = 1;
                 SupportFieldsModified = TRUE;
             }
         }
@@ -1615,6 +1830,10 @@ NTSTATUS VioGpuVidPN::SetVidPnSourceVisibility(_In_ CONST DXGKARG_SETVIDPNSOURCE
     VIOGPU_ASSERT(pSetVidPnSourceVisibility != NULL);
     VIOGPU_ASSERT((pSetVidPnSourceVisibility->VidPnSourceId < MAX_VIEWS) ||
                   (pSetVidPnSourceVisibility->VidPnSourceId == D3DDDI_ID_ALL));
+    DbgPrint(TRACE_LEVEL_INFORMATION,
+             ("vidpn visibility: source %u %s\n",
+              pSetVidPnSourceVisibility->VidPnSourceId,
+              pSetVidPnSourceVisibility->Visible ? "visible" : "hidden"));
 
     UINT StartVidPnSourceId = (pSetVidPnSourceVisibility->VidPnSourceId == D3DDDI_ID_ALL) ? 0
                                                                                           : pSetVidPnSourceVisibility->VidPnSourceId;
@@ -2132,7 +2351,13 @@ void VioGpuVidPN::Flip()
             m_pAdapter->ctrlQueue.SetScanout(0, 0, 0, 0, 0, 0);
         }
     }
+    // dxgkrnl turns the vsync interrupt on with DxgkDdiControlInterrupt when it waits for one.
+    if (InterlockedCompareExchange(&m_vsyncEnabled, 0, 0) == 0)
+    {
+        return;
+    }
     DXGKARGCB_NOTIFY_INTERRUPT_DATA interrupt;
+    RtlZeroMemory(&interrupt, sizeof(interrupt));
     interrupt.InterruptType = DXGK_INTERRUPT_CRTC_VSYNC;
 
     interrupt.CrtcVsync.VidPnTargetId = 0;
@@ -2200,6 +2425,14 @@ PAGED_CODE_SEG_END
 
 NTSTATUS VioGpuVidPN::SetVidPnSourceAddress(const DXGKARG_SETVIDPNSOURCEADDRESS *pSetVidPnSourceAddress)
 {
+    if (reinterpret_cast<VioGpu3dAllocation *>(pSetVidPnSourceAddress->hAllocation) != m_sourceRes)
+    {
+        DbgPrint(TRACE_LEVEL_INFORMATION,
+                 ("vidpn source address: source %u, allocation %p, flags 0x%X\n",
+                  pSetVidPnSourceAddress->VidPnSourceId,
+                  pSetVidPnSourceAddress->hAllocation,
+                  pSetVidPnSourceAddress->Flags.Value));
+    }
     m_sourceAddress = pSetVidPnSourceAddress->PrimaryAddress;
     m_sourceRes = reinterpret_cast<VioGpu3dAllocation *>(pSetVidPnSourceAddress->hAllocation);
     InterlockedOr(&m_shouldFlip, 1);

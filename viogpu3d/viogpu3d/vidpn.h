@@ -105,6 +105,7 @@ class VioGpuVidPN
     void SetCustomDisplay(_In_ USHORT xres, _In_ USHORT yres);
 
     NTSTATUS IsSupportedVidPn(_Inout_ DXGKARG_ISSUPPORTEDVIDPN *pIsSupportedVidPn);
+    void LogVidPn(const char *pWhat, D3DKMDT_HVIDPN hVidPn) const;
     NTSTATUS RecommendFunctionalVidPn(_In_ CONST DXGKARG_RECOMMENDFUNCTIONALVIDPN *CONST pRecommendFunctionalVidPn);
     NTSTATUS RecommendVidPnTopology(_In_ CONST DXGKARG_RECOMMENDVIDPNTOPOLOGY *CONST pRecommendVidPnTopology);
     NTSTATUS RecommendMonitorModes(_In_ CONST DXGKARG_RECOMMENDMONITORMODES *CONST pRecommendMonitorModes);
@@ -139,22 +140,33 @@ class VioGpuVidPN
     }
 
     NTSTATUS SetVidPnSourceAddress(const DXGKARG_SETVIDPNSOURCEADDRESS *pSetVidPnSourceAddress);
+    void EnableVsync(BOOLEAN enable)
+    {
+        InterlockedExchange(&m_vsyncEnabled, enable ? 1 : 0);
+    }
     BOOLEAN IsShowing(const VioGpu3dAllocation *pAllocation) const
     {
         return pAllocation != NULL && m_sourceRes == pAllocation;
     }
 
   private:
+    NTSTATUS CheckVidPn(D3DKMDT_HVIDPN hVidPn, BOOLEAN *pSupported) const;
+    NTSTATUS EnumCofuncModality(_In_ CONST DXGKARG_ENUMVIDPNCOFUNCMODALITY *CONST pEnumCofuncModality);
     NTSTATUS SetSourceModeAndPath(CONST D3DKMDT_VIDPN_SOURCE_MODE *pSourceMode,
                                   CONST D3DKMDT_VIDPN_PRESENT_PATH *pPath);
     NTSTATUS AddSingleMonitorMode(_In_ CONST DXGKARG_RECOMMENDMONITORMODES *CONST pRecommendMonitorModes);
     NTSTATUS AddSingleSourceMode(_In_ CONST DXGK_VIDPNSOURCEMODESET_INTERFACE *pVidPnSourceModeSetInterface,
                                  D3DKMDT_HVIDPNSOURCEMODESET hVidPnSourceModeSet,
-                                 D3DDDI_VIDEO_PRESENT_SOURCE_ID SourceId);
+                                 _In_opt_ CONST D3DKMDT_2DREGION *pPinnedTargetSize);
     NTSTATUS AddSingleTargetMode(_In_ CONST DXGK_VIDPNTARGETMODESET_INTERFACE *pVidPnTargetModeSetInterface,
                                  D3DKMDT_HVIDPNTARGETMODESET hVidPnTargetModeSet,
-                                 _In_opt_ CONST D3DKMDT_VIDPN_SOURCE_MODE *pVidPnPinnedSourceModeInfo,
-                                 D3DDDI_VIDEO_PRESENT_SOURCE_ID SourceId);
+                                 _In_opt_ CONST D3DKMDT_VIDPN_SOURCE_MODE *pVidPnPinnedSourceModeInfo);
+    static BOOLEAN IsModeOfSize(PVIDEO_MODE_INFORMATION pModeInfo, _In_opt_ CONST D3DKMDT_2DREGION *pSize);
+    NTSTATUS PinnedTargetSize(_In_ CONST DXGK_VIDPN_INTERFACE *pVidPnInterface,
+                              D3DKMDT_HVIDPN hVidPn,
+                              D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId,
+                              _Out_ D3DKMDT_2DREGION *pSize,
+                              _Out_ BOOLEAN *pPinned) const;
     D3DDDI_VIDEO_PRESENT_SOURCE_ID FindSourceForTarget(D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId, BOOLEAN DefaultToZero);
     VOID BuildVideoSignalInfo(D3DKMDT_VIDEO_SIGNAL_INFO *pVideoSignalInfo, PVIDEO_MODE_INFORMATION pModeInfo);
 
@@ -179,6 +191,7 @@ class VioGpuVidPN
     PHYSICAL_ADDRESS m_sourceAddress = {};
     VioGpu3dAllocation *m_sourceRes = NULL;
     volatile LONG m_shouldFlip = 0;
+    volatile LONG m_vsyncEnabled = 0;
 
     PETHREAD m_pFlipThread = NULL;
     BOOL m_shouldFlipStop = false;

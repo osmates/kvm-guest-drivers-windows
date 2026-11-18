@@ -64,6 +64,7 @@
 // The largest display: 16,777,216 pixels, 64 MiB at 4 bytes, so 5120 x 2880 fits.
 #define VIOGPU3D_MAX_DISPLAY_PIXELS (16u * 1024 * 1024)
 #define VIOGPU3D_MAX_DISPLAY_SIDE   8184
+#define VIOGPU3D_REFRESH_HZ         60
 
 #define VIOGPU3D_TAG                '3dGV'
 

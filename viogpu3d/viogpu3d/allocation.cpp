@@ -1039,6 +1039,7 @@ NTSTATUS VioGpu3dAdapter::GetStandardAllocationDriverData(_Inout_ DXGKARG_GETSTA
     D3DDDIFORMAT format = D3DDDIFMT_X8R8G8B8;
     D3DDDI_VIDEO_PRESENT_SOURCE_ID sourceId = D3DDDI_ID_UNINITIALIZED;
     UINT *pPitch = NULL;
+    DbgPrint(TRACE_LEVEL_INFORMATION, ("standard allocation: type %d\n", pStandard->StandardAllocationType));
     switch (pStandard->StandardAllocationType)
     {
         case D3DKMDT_STANDARDALLOCATION_SHAREDPRIMARYSURFACE:
