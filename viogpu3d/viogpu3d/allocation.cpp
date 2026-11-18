@@ -465,6 +465,12 @@ NTSTATUS VioGpu3dAllocation::CreateOnHost(_In_ VioGpu3dDevice *pDevice)
     NTSTATUS status = SendPrelude(pDevice);
     if (!NT_SUCCESS(status))
     {
+        DbgPrint(TRACE_LEVEL_ERROR,
+                 ("%s blob %u: the command its resource carried (%u bytes) failed with %x\n",
+                  __FUNCTION__,
+                  m_ResId,
+                  m_PreludeSize,
+                  status));
         return status;
     }
     VIRTIO_WDDM_ALLOCATE_BLOB *pBlob = &m_Info.Base.Blob;
@@ -999,6 +1005,13 @@ NTSTATUS VioGpu3dAdapter::CreateAllocation(_Inout_ DXGKARG_CREATEALLOCATION *pCr
             DbgPrint(TRACE_LEVEL_ERROR, ("%s allocation %u refused with %x\n", __FUNCTION__, i, status));
             return status;
         }
+        DbgPrint(TRACE_LEVEL_VERBOSE,
+                 ("---> %s resource %u, tag 0x%llx, %llu bytes, segments 0x%x\n",
+                  __FUNCTION__,
+                  pAllocation->GetResId(),
+                  pAllocation->GetInfo().Base.Tag,
+                  (ULONGLONG)pInfo->Size,
+                  pInfo->SupportedReadSegmentSet));
     }
     return STATUS_SUCCESS;
 }
@@ -1009,7 +1022,10 @@ NTSTATUS VioGpu3dAdapter::DestroyAllocation(_In_ CONST DXGKARG_DESTROYALLOCATION
 
     for (UINT i = 0; i < pDestroyAllocation->NumAllocations; i++)
     {
-        delete reinterpret_cast<VioGpu3dAllocation *>(pDestroyAllocation->pAllocationList[i]);
+        VioGpu3dAllocation *pAllocation = reinterpret_cast<VioGpu3dAllocation *>(pDestroyAllocation->pAllocationList[i]);
+        DbgPrint(TRACE_LEVEL_VERBOSE,
+                 ("---> %s resource %u\n", __FUNCTION__, pAllocation != NULL ? pAllocation->GetResId() : 0));
+        delete pAllocation;
     }
     return STATUS_SUCCESS;
 }
@@ -1170,6 +1186,13 @@ NTSTATUS VioGpu3dAdapter::BuildPagingBuffer(_Inout_ DXGKARG_BUILDPAGINGBUFFER *p
                     pUpdate->PageTableLevel >= VIOGPU3D_PT_LEVELS || pUpdate->StartIndex > VIOGPU3D_PT_ENTRIES ||
                     pUpdate->NumPageTableEntries > VIOGPU3D_PT_ENTRIES - pUpdate->StartIndex)
                 {
+                    DbgPrint(TRACE_LEVEL_ERROR,
+                             ("page table update refused: mode %u, flags 0x%x, level %u, start %u, %u entries\n",
+                              (UINT)pUpdate->UpdateMode,
+                              *(const UINT *)&pUpdate->Flags,
+                              pUpdate->PageTableLevel,
+                              pUpdate->StartIndex,
+                              pUpdate->NumPageTableEntries));
                     return STATUS_INVALID_PARAMETER;
                 }
                 if (pUpdate->NumPageTableEntries == 0)
@@ -1179,6 +1202,9 @@ NTSTATUS VioGpu3dAdapter::BuildPagingBuffer(_Inout_ DXGKARG_BUILDPAGINGBUFFER *p
                 DXGK_PTE *pDest = (DXGK_PTE *)pUpdate->PageTableAddress.CpuVirtual;
                 if (pDest == NULL || pUpdate->pPageTableEntries == NULL)
                 {
+                    DbgPrint(TRACE_LEVEL_ERROR,
+                             ("page table update refused: no CPU mapping of the level %u table\n",
+                              pUpdate->PageTableLevel));
                     return STATUS_INVALID_PARAMETER;
                 }
                 pDest += pUpdate->StartIndex;

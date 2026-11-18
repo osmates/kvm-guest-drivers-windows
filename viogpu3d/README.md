@@ -7,13 +7,20 @@ display-only driver in `viogpu` stays as it is.
 ## Status
 
 - Compiled for Windows 11 ARM64 with clang and lld-link through `Tools/build-macos.sh`. Not built with MSVC yet.
-- Not run in a guest yet.
+- Run in a Windows 11 guest on OSMates' accelerated GPU (2026-11-18): the driver starts (problem code 0) and dxgkrnl
+  reports the adapter as render and display, WDDM 2.0, GpuMmu. Direct3D 12 devices run on it through vkd3d-proton
+  and Venus; Direct3D 11 devices and presents do not yet, and the desktop stays on a software display adapter
+  (below, "Not done yet").
+- dxgkrnl fails the adapter after a successful start, code 43, when its software key has no `UserModeDriverName`
+  (`Microsoft-Windows-DxgKrnl-Admin` event 549, "Object Name not found", `StartAdapter_AddAdapterFailed`). So the
+  package always carries the Direct3D driver, and the build refuses to pack it without the Direct3D driver's DLLs,
+  which come from this or an earlier `--d3d-umd`.
 - The package carries Mesa's Venus Vulkan driver, cross-built with llvm-mingw: `vulkan_virtio.dll` (ARM64X, for
   ARM64 and x64 processes, named by `VulkanDriverName`) and `vulkan_virtio_x86.dll` (named by
   `VulkanDriverNameWow`). And the Direct3D 10, 11 and 12 user-mode driver of `umd/`: `viogpu3d_umd.dll` (ARM64X,
   named by `UserModeDriverName`) and `viogpu3d_umd_x86.dll` (named by `UserModeDriverNameWow`), with vkd3d-proton
-  beside them as `viogpu3d_vkd3d.dll` and `viogpu3d_vkd3d_x86.dll`. Compiled, not loaded in Windows yet:
-  `umd/README.md`.
+  beside them as `viogpu3d_vkd3d.dll` and `viogpu3d_vkd3d_x86.dll`. Windows loads them from the driver store in
+  ARM64, x64 and x86 processes; what works and what fails after that: `umd/README.md`.
 
 ## Device
 
@@ -32,7 +39,12 @@ display-only driver in `viogpu` stays as it is.
   contiguous memory. The device never reads a GPU virtual address: it addresses memory by resource.
 - Two segments: a 1 GiB aperture of system memory, and the page tables.
 - 64 nodes: 0 for the system, 1 for Venus, 2 for paging, 3 to 63 for Venus rings 0 to 60. Mesa's Venus ICD opens
-  one virtual context a ring on nodes 3 to 63.
+  one virtual context a ring on nodes 3 to 63. Every node reports `GpuMmuSupported`: without it dxgkrnl refuses every
+  virtual context with `STATUS_INVALID_PARAMETER` before the driver sees it, and takes the change only after a restart
+  of Windows, not of the device.
+- An allocation's driver object comes from `DxgkCbAcquireHandleData`, released with `DxgkCbReleaseHandleData` when
+  the call is done. dxgkrnl answers `DxgkCbGetHandleData` with NULL to a WDDM 2.0 driver (DxgKrnl event 494, "WDDM2
+  driver calls WDDM1.x DDI!"), which failed every `DxgkDdiOpenAllocation`, so the creation of every allocation.
 - A DMA buffer completes once every fenced command it sent has signalled, in the order the scheduler gave them.
 - One Venus context of the driver's own, made at start, which gets no Venus command: its blobs are plain shared
   memory on the host.
@@ -84,8 +96,16 @@ merge request 38731): the same tags and layouts.
 
 ## Not done yet
 
-- A run of the Direct3D user-mode driver in Windows, for ARM64, x64 and x86 apps, its D3D12 DDI among them; a D3D9
-  DDI (D3D9 apps get D3D9On12 only when they ask for it themselves).
+- A Direct3D 11 device: DXVK's Vulkan device fails on Venus (`umd/README.md`).
+- Presents: the host refuses the blob of a Direct3D 12 swapchain's buffers (`RESOURCE_CREATE_BLOB`, `ERR_UNSPEC`).
+- The desktop on this adapter: Windows lights a software display adapter instead, the scanout keeps the firmware's
+  boot screen, and `DxgkDdiCommitVidPn` gets no path. Likely because DWM gets no Direct3D 11 device here; to check
+  once it does.
+- After several restarts of the device in one boot, the 16 MiB of contiguous memory for the page tables segment can
+  be missing, and the start fails (`STATUS_INSUFFICIENT_RESOURCES`, code 43). Page tables in the implicit system
+  memory segment, as Microsoft's compute-only sample keeps them, would need none.
+- `SupportPerEngineTDR` stays off: with it dxgkrnl refuses to start the adapter.
+- A D3D9 DDI (D3D9 apps get D3D9On12 only when they ask for it themselves).
 - A run of the surfaces above and the present's blts in Windows, with another process importing them through Venus.
 - Hardware queues and the GPU's own scheduling.
 - After a power transition the host has lost its contexts and resources; the driver does not report a lost device

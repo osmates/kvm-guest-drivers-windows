@@ -516,7 +516,10 @@ class VioGpu3dAdapter final : IVioGpuPCI
         return m_SurfaceCookie;
     }
     const VIOGPU3D_CAPSET *FindCapset(UINT id) const;
-    VioGpu3dAllocation *AllocationFromHandle(D3DKMT_HANDLE handle);
+    // dxgkrnl refuses DxgkCbGetHandleData to a WDDM 2.0 driver ("WDDM2 driver calls WDDM1.x DDI!"): each allocation
+    // acquired here holds a reference until ReleaseAllocation.
+    VioGpu3dAllocation *AcquireAllocation(D3DKMT_HANDLE handle, _Out_ DXGKARG_RELEASE_HANDLE *pRelease);
+    void ReleaseAllocation(DXGKARG_RELEASE_HANDLE release);
 
     // Submission tracking, from the scheduler to the device's fences and back.
     VIOGPU3D_DMA *BeginDma(UINT node, UINT fenceId);

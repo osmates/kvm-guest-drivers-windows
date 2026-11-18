@@ -322,16 +322,21 @@ NTSTATUS APIENTRY VioGpu3dOpenAllocation(_In_ CONST HANDLE hDevice, _In_ CONST D
     PAGED_CODE();
     VioGpu3dDevice *pDevice = reinterpret_cast<VioGpu3dDevice *>(hDevice);
     VioGpu3dAdapter *pAdapter = pDevice->GetAdapter();
+    DbgPrint(TRACE_LEVEL_VERBOSE,
+             ("---> %s %u allocations, flags 0x%x, context %u\n",
+              __FUNCTION__,
+              pOpenAllocation->NumAllocations,
+              pOpenAllocation->Flags.Value,
+              pDevice->GetCtxId()));
     for (UINT i = 0; i < pOpenAllocation->NumAllocations; i++)
     {
         DXGK_OPENALLOCATIONINFO *pInfo = &pOpenAllocation->pOpenAllocation[i];
-        DXGKARGCB_GETHANDLEDATA getHandleData = {};
-        getHandleData.hObject = pInfo->hAllocation;
-        getHandleData.Type = DXGK_HANDLE_ALLOCATION;
-        VioGpu3dAllocation *pAllocation = reinterpret_cast<VioGpu3dAllocation *>(pAdapter->GetDxgkInterface()->DxgkCbGetHandleData(
-                                                                                                            &getHandleData));
+        DXGKARG_RELEASE_HANDLE release;
+        VioGpu3dAllocation *pAllocation = pAdapter->AcquireAllocation(pInfo->hAllocation, &release);
         if (pAllocation == NULL)
         {
+            DbgPrint(TRACE_LEVEL_ERROR,
+                     ("%s no driver allocation for handle 0x%x\n", __FUNCTION__, pInfo->hAllocation));
             return STATUS_INVALID_PARAMETER;
         }
         // The creating device makes the host resource in its context, after any command its resource carried.
@@ -339,12 +344,21 @@ NTSTATUS APIENTRY VioGpu3dOpenAllocation(_In_ CONST HANDLE hDevice, _In_ CONST D
                                                         : pAllocation->Open(pDevice);
         if (!NT_SUCCESS(status))
         {
+            DbgPrint(TRACE_LEVEL_ERROR,
+                     ("%s resource %u, flags 0x%x, failed with %x\n",
+                      __FUNCTION__,
+                      pAllocation->GetResId(),
+                      pOpenAllocation->Flags.Value,
+                      status));
+            pAdapter->ReleaseAllocation(release);
             return status;
         }
         if (pInfo->pPrivateDriverData != NULL && pInfo->PrivateDriverDataSize >= sizeof(VIRTIO_WDDM_CREATE_ALLOCATION))
         {
             *(VIRTIO_WDDM_CREATE_ALLOCATION *)pInfo->pPrivateDriverData = pAllocation->GetInfo();
         }
+        // dxgkrnl keeps the allocation until every device has closed it, so the device's handle needs no reference.
+        pAdapter->ReleaseAllocation(release);
         pInfo->hDeviceSpecificAllocation = pAllocation;
     }
     return STATUS_SUCCESS;
@@ -360,6 +374,7 @@ NTSTATUS APIENTRY VioGpu3dCloseAllocation(_In_ CONST HANDLE hDevice,
         VioGpu3dAllocation *pAllocation = reinterpret_cast<VioGpu3dAllocation *>(pCloseAllocation->pOpenHandleList[i]);
         if (pAllocation != NULL)
         {
+            DbgPrint(TRACE_LEVEL_VERBOSE, ("---> %s resource %u\n", __FUNCTION__, pAllocation->GetResId()));
             pAllocation->Close(pDevice);
         }
     }
@@ -663,6 +678,9 @@ NTSTATUS APIENTRY VioGpu3dGetNodeMetadata(_In_ CONST HANDLE hAdapter,
             break;
     }
     RtlStringCchCopyW(pGetNodeMetadata->FriendlyName, ARRAYSIZE(pGetNodeMetadata->FriendlyName), name);
+    // dxgkrnl refuses every virtual context (STATUS_INVALID_PARAMETER) on a node without it, so Venus and the
+    // Direct3D runtimes get no context at all.
+    pGetNodeMetadata->GpuMmuSupported = TRUE;
     return STATUS_SUCCESS;
 }
 

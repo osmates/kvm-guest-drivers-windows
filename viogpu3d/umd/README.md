@@ -15,7 +15,8 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
 
 - Compiled and linked for Windows on Arm with llvm-mingw through `Tools/build-macos.sh --d3d-umd`, for aarch64,
   arm64ec and i686, in the Win11 and the Win10 package; vkd3d-proton for ARM64X and i686.
-- Not loaded in Windows yet: everything that happens at run time is unproven (see the last section).
+- Run in a Windows 11 guest (2026-11-18): Direct3D 12 devices on Venus in ARM64, x64 and x86 processes; no Direct3D
+  11 device and no present yet. See "Measured in Windows" below.
 - The platform-free parts have unit tests that run on macOS: `sh viogpu3d/umd/tests/run-host-tests.sh`.
 - The build checks the package with `tests/check-package.sh`.
 
@@ -96,8 +97,8 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
   their Direct3D 12 forms (`umd_d3d12_allocate_args`), with Venus's resource handle, which is NULL for memory no
   runtime resource asked for. The device is on the Venus physical device with the adapter's LUID.
 - `CreateDevice` logs which of the callbacks Venus calls this runtime fills, and refuses the device when the
-  kernel-thunk `pfnCreateContextVirtualCb` is NULL: Venus makes its ring contexts with it, and nothing documents it
-  under Direct3D 12.
+  kernel-thunk `pfnCreateContextVirtualCb` is NULL: Venus makes its ring contexts with it. Nothing documents it under
+  Direct3D 12; Windows 11's runtime fills it.
 - Fences and presents: the runtime services an app's fences with monitored-fence packets on each queue's kernel
   context, which complete as soon as the context's earlier work has, and the work runs on vkd3d-proton's own Venus
   contexts. So after each `ExecuteCommandLists`, and before each flip present returns, the driver signals a timeline
@@ -239,16 +240,46 @@ Tools/build-macos.sh --d3d-umd --venus-icd <aarch64 Mesa build>/src/virtio/vulka
   has the full text of every third-party licence below, says vkd3d-proton is a modified one, and names the fork, its
   commit and where its source is.
 
+## Measured in Windows
+
+A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected from `OutputDebugString` (2026-11-18):
+
+- The Direct3D 10 and 11 runtime and the Direct3D 12 runtime open the adapter through this driver: `OpenAdapter10_2`
+  and `OpenAdapter12` log the LUID and capability sets `0x16` (Venus among them); Triton offers its versions; the
+  driver loads `vulkan_virtio.dll` and `viogpu3d_vkd3d.dll` from the driver store folder, and their `_x86` builds in
+  x86 processes. The Direct3D 12 runtime takes the version Triton offers from this WDDM 2.0 kernel driver.
+- Venus's contexts need the kernel driver's nodes to report `GpuMmuSupported` (from a restart of Windows on), and its
+  memory needs the kernel driver to open allocations with `DxgkCbAcquireHandleData` (`../README.md`). Before both,
+  every device failed: `0xc000000d` for each context, then `failed to allocate/map ring shmem`.
+- Direct3D 12: `D3D12CreateDevice` makes a vkd3d-proton device on Venus in ARM64, x64 and x86 processes, at feature
+  level 12_0 at most, shader model 6.0, resource binding tier 3, tiled resources tier 2. A compute queue's copy that
+  the direct queue waits for reads back right, a queue waiting for a CPU fence holds until the CPU signals,
+  `MakeResident`, `Evict` and `SetResidencyPriority` succeed, and the tiled resources sample passes every check but
+  one (a buffer tile read in the invocation that wrote it). The core layer's `pfnAllocateCb` takes `hResource` NULL;
+  the `E_INVALIDARG` seen before was the kernel driver's failed open.
+- Direct3D 12 presents: `CreateSwapChainForHwnd` fails (`E_OUTOFMEMORY` on the desktop,
+  `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE` in session 0). The host refuses the back buffers' blob (`RESOURCE_CREATE_BLOB`,
+  `ERR_UNSPEC`), so `pfnAllocateCb` with `hResource` set fails with `E_FAIL`.
+- Direct3D 11: DXVK's `vkCreateDevice` on Venus fails with `VK_ERROR_EXTENSION_NOT_PRESENT`, so `CreateDevice` fails
+  with `E_FAIL`. In session 0 DXVK enables `VK_KHR_incremental_present` and `VK_EXT_hdr_metadata` without
+  `VK_KHR_swapchain`: Venus implements both itself and keeps them from the host only when `VK_KHR_swapchain` is on,
+  and the host's renderer knows neither. In the signed-in session DXVK enables `VK_KHR_swapchain` too and still
+  fails, though KosmicKrisp on the host lists every other extension DXVK enables: not found yet.
+- The Direct3D 12 runtime's kernel-thunk table has `CreateContextVirtual`, `DestroyContext`,
+  `CreateSynchronizationObject2`, `DestroySynchronizationObject`, `SignalFromGpu2`, `WaitFromGpu`, `SignalFromCpu`,
+  `WaitFromCpu`, `SubmitCommand`, `Escape`, `CreatePagingQueue` and `MakeResident`, and no `Allocate` or
+  `Deallocate`; the core layer has `Allocate`, `Deallocate` and `CreateContextVirtual`.
+- Windows keeps the desktop on a software display adapter (no Direct3D 11 device for DWM here), whose render side
+  DXGI lists as "Microsoft Basic Render Driver" without `DXGI_ADAPTER_FLAG_SOFTWARE`, first in session 0: an app that
+  takes the first adapter that is not software renders with WARP. D3D9 takes the desktop's adapter, and
+  `Direct3DCreate9On12` D3D9's, so both land on Basic Render.
+
 ## Unproven, and not done
 
-- Nothing ran in Windows: that the runtime takes the DDI tables, that Venus works through the runtime's callbacks,
-  that DXVK reaches feature level 11_0 or 11_1 through Venus on KosmicKrisp, that DWM composes, that the runtime loads
-  the DLLs from their driver store paths. No Windows 10 guest has had the Win10 package.
-- x64 apps: that the D3D runtime of an emulated x64 process takes the ARM64EC view of `UserModeDriverName`'s DLL
-  (Windows' own system DLLs for x64 apps are ARM64X; no display driver page says it for drivers).
-- x86 apps: that the WOW64 runtime and the Vulkan loader read the `Wow` values and find the DLLs beside the 64-bit
-  ones; that the kernel driver's blob maps land below 4 GiB for a 32-bit process, as Microsoft documents for
-  `MmMapLockedPagesSpecifyCache`.
+- A Direct3D 11 device (above), then every step after it: that DXVK reaches feature level 11_0 or 11_1 through Venus
+  on KosmicKrisp, that DWM composes, and the rest of this list. No Windows 10 guest has had the Win10 package.
+- x64 and x86 apps on Direct3D 11. Direct3D 12 runs in both (above): the x64 runtime takes the ARM64EC view of
+  `UserModeDriverName`'s DLL, the WOW64 one `UserModeDriverNameWow`'s, and Venus maps its memory in a 32-bit process.
 - Shared textures need Venus to export image memory as `OPAQUE_WIN32_KMT`; primaries and shared textures need linear
   render targets on KosmicKrisp, and the kernel driver's flip of a `HOST3D` primary.
 - Opening another process's shared texture or the kernel driver's surfaces: the host side exists (OSMates with the
@@ -260,17 +291,10 @@ Tools/build-macos.sh --d3d-umd --venus-icd <aarch64 Mesa build>/src/virtio/vulka
   `GetDC`, `AcquireSync`, `ReleaseSync` or `CreateSharedHandle`, it fails with `DXGI_ERROR_UNSUPPORTED`, `E_FAIL` or
   `E_NOTIMPL`, as `OpenSharedResource` and `OpenSharedResource1` already did.
 - No D3D9 DDI.
-- Direct3D 12: that the runtime takes `OpenAdapter12` and DDI `_0082` from a WDDM 2.0 kernel driver; which
-  kernel-thunk callbacks it fills, above all `pfnCreateContextVirtualCb` with the device handle, which Venus makes its
-  ring contexts with; that the core layer's `pfnAllocateCb` takes an allocation with a NULL `hResource`, which Venus
-  passes for its own memory and every `VkDeviceMemory` no runtime resource asked for (Microsoft documents `hResource`
-  only as "the handle of a resource", and its sample passes a heap's runtime handle; a refusal is logged as
-  `allocate: the core layer's pfnAllocateCb failed with hResource NULL`); that vkd3d-proton makes a device on Venus
-  over KosmicKrisp (with texel buffer views at any texel offset, which vkd3d-proton requires: OSMates' KosmicKrisp
-  from osmates/mesa `fa3c7b57` on); the feature level it reaches (11_1 is predicted); that the queue gate keeps app
-  fences and presents GPU-true; DWM composing Direct3D 12 back buffers through their companions; the cache folder
-  rule; the vkd3d-proton DLL loading in ARM64, x64 and x86 processes; that the fork's build without D3DKMT changes
-  nothing an app sees through the runtime (no call of the runtime's reaches the parts it built out).
+- Direct3D 12: a swapchain (the host's blob for its buffers, above); that the queue gate keeps app fences and
+  presents GPU-true; DWM composing Direct3D 12 back buffers through their companions; the cache folder rule; that the
+  fork's build without D3DKMT changes nothing an app sees through the runtime (no call of the runtime's reaches the
+  parts it built out).
 - Direct3D 12 gaps known now: app waits on CPU-signalled fences are kernel packets the driver never sees (Triton has
   the same gap); opened shared resources (`OpenHeapAndResource`) are refused, as in Triton; a Direct3D 12 primary
   scans out source 0.

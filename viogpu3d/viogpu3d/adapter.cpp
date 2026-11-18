@@ -687,12 +687,14 @@ NTSTATUS VioGpu3dAdapter::EscapeResourceInfo(_Inout_ VIRTIO_WDDM_RESOURCE_INFO *
 {
     PAGED_CODE();
 
-    VioGpu3dAllocation *pAllocation = AllocationFromHandle(pInfo->Handle);
+    DXGKARG_RELEASE_HANDLE release;
+    VioGpu3dAllocation *pAllocation = AcquireAllocation(pInfo->Handle, &release);
     if (pAllocation == NULL)
     {
         return STATUS_INVALID_PARAMETER;
     }
     pInfo->Info = pAllocation->GetInfo();
+    ReleaseAllocation(release);
     return STATUS_SUCCESS;
 }
 
@@ -700,18 +702,24 @@ NTSTATUS VioGpu3dAdapter::EscapeBlobMap(_Inout_ VIRTIO_WDDM_BLOB_MAP *pMap)
 {
     PAGED_CODE();
 
-    VioGpu3dAllocation *pAllocation = AllocationFromHandle(pMap->Handle);
+    DXGKARG_RELEASE_HANDLE release;
+    VioGpu3dAllocation *pAllocation = AcquireAllocation(pMap->Handle, &release);
     if (pAllocation == NULL)
     {
         return STATUS_INVALID_PARAMETER;
     }
+    NTSTATUS status;
     if (pMap->Flags & VIRTIO_WDDM_BLOB_MAP_FLAGS_UNMAP)
     {
-        return pAllocation->UnmapFromProcess((PVOID)(ULONG_PTR)pMap->Ptr);
+        status = pAllocation->UnmapFromProcess((PVOID)(ULONG_PTR)pMap->Ptr);
     }
-    PVOID address = NULL;
-    NTSTATUS status = pAllocation->MapToProcess(&address);
-    pMap->Ptr = (UINT64)(ULONG_PTR)address;
+    else
+    {
+        PVOID address = NULL;
+        status = pAllocation->MapToProcess(&address);
+        pMap->Ptr = (UINT64)(ULONG_PTR)address;
+    }
+    ReleaseAllocation(release);
     return status;
 }
 
@@ -1850,11 +1858,29 @@ void VioGpu3dAdapter::ForgetDevice(VioGpu3dDevice *pDevice)
     KeReleaseSpinLock(&m_NodeLock, irql);
 }
 
-VioGpu3dAllocation *VioGpu3dAdapter::AllocationFromHandle(D3DKMT_HANDLE handle)
+VioGpu3dAllocation *VioGpu3dAdapter::AcquireAllocation(D3DKMT_HANDLE handle, _Out_ DXGKARG_RELEASE_HANDLE *pRelease)
 {
-    DXGKARGCB_GETHANDLEDATA getHandleData;
+    DXGKARGCB_GETHANDLEDATA getHandleData = {};
     getHandleData.hObject = handle;
     getHandleData.Type = DXGK_HANDLE_ALLOCATION;
-    getHandleData.Flags.DeviceSpecific = 0;
-    return reinterpret_cast<VioGpu3dAllocation *>(m_DxgkInterface.DxgkCbGetHandleData(&getHandleData));
+    *pRelease = NULL;
+    PVOID data = m_DxgkInterface.DxgkCbAcquireHandleData(&getHandleData, pRelease);
+    if (data == NULL)
+    {
+        ReleaseAllocation(*pRelease);
+        *pRelease = NULL;
+    }
+    return reinterpret_cast<VioGpu3dAllocation *>(data);
+}
+
+void VioGpu3dAdapter::ReleaseAllocation(DXGKARG_RELEASE_HANDLE release)
+{
+    if (release == NULL)
+    {
+        return;
+    }
+    DXGKARGCB_RELEASEHANDLEDATA releaseHandleData = {};
+    releaseHandleData.ReleaseHandle = release;
+    releaseHandleData.Type = DXGK_HANDLE_ALLOCATION;
+    m_DxgkInterface.DxgkCbReleaseHandleData(releaseHandleData);
 }
