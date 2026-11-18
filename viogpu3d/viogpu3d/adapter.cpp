@@ -1094,7 +1094,32 @@ void VioGpu3dAdapter::ThreadWorkRoutine(void)
     }
 }
 
-// CDD's blts and fills, which the work thread runs on the CPU once the scheduler submits the buffer.
+// One surface of a present this driver refuses, as the allocation list names it.
+static void LogPresentSurface(const CHAR *role, _In_opt_ const VioGpu3dAllocation *pAllocation)
+{
+    PAGED_CODE();
+
+    if (pAllocation == NULL)
+    {
+        DbgPrint(TRACE_LEVEL_WARNING, ("present refused: the %s is not in the allocation list\n", role));
+        return;
+    }
+    DbgPrint(TRACE_LEVEL_WARNING,
+             ("present refused: the %s is resource %u, kind %u, standard type %u, kernel %u, primary %u, %ux%u, "
+              "pitch %u, presentable %u\n",
+              role,
+              pAllocation->GetResId(),
+              pAllocation->GetKind(),
+              pAllocation->GetStandardType(),
+              (UINT)pAllocation->IsKernelSurface(),
+              (UINT)pAllocation->IsPrimary(),
+              pAllocation->GetWidth(),
+              pAllocation->GetHeight(),
+              pAllocation->GetPitch(),
+              (UINT)pAllocation->IsPresentable()));
+}
+
+// CDD's blts and fills, run on the CPU by the work thread; refusals use DxgkDdiPresent's documented statuses.
 NTSTATUS VioGpu3dAdapter::Present(_In_ VioGpu3dContext *pContext, _Inout_ DXGKARG_PRESENT *pPresent)
 {
     PAGED_CODE();
@@ -1108,28 +1133,47 @@ NTSTATUS VioGpu3dAdapter::Present(_In_ VioGpu3dContext *pContext, _Inout_ DXGKAR
     if (pContext == NULL || !pContext->HasDmaBuffer())
     {
         DbgPrint(TRACE_LEVEL_WARNING, ("%s blt or fill on a context without a DMA buffer refused\n", __FUNCTION__));
-        return STATUS_NOT_SUPPORTED;
+        return STATUS_ILLEGAL_INSTRUCTION;
     }
     if (!(flags.Blt || flags.ColorFill) || flags.SrcColorKey || flags.DstColorKey || flags.LinearToSrgb ||
         flags.Rotate || flags.BltStereoUseRight)
     {
         DbgPrint(TRACE_LEVEL_WARNING, ("%s present with flags %x not supported\n", __FUNCTION__, flags.Value));
-        return STATUS_NOT_SUPPORTED;
+        return STATUS_ILLEGAL_INSTRUCTION;
     }
     VioGpu3dAllocation *pDst = reinterpret_cast<VioGpu3dAllocation *>(pPresent->pAllocationList[DXGK_PRESENT_DESTINATION_INDEX].hDeviceSpecificAllocation);
     VioGpu3dAllocation *pSrc = flags.Blt ? reinterpret_cast<VioGpu3dAllocation *>(pPresent->pAllocationList[DXGK_PRESENT_SOURCE_INDEX].hDeviceSpecificAllocation)
                                          : NULL;
     if (pDst == NULL || !pDst->IsPresentable() || (flags.Blt && (pSrc == NULL || !pSrc->IsPresentable())))
     {
-        DbgPrint(TRACE_LEVEL_WARNING, ("%s present between surfaces it cannot copy\n", __FUNCTION__));
-        return STATUS_NOT_SUPPORTED;
+        static LONG refused;
+        LONG n = InterlockedIncrement(&refused);
+        if (n <= 8 || n % 256 == 0)
+        {
+            DbgPrint(TRACE_LEVEL_WARNING,
+                     ("present refused #%ld: flags 0x%x, context flags 0x%x, %ux%u to %ux%u, %u rects\n",
+                      n,
+                      flags.Value,
+                      pContext->GetFlags().Value,
+                      (UINT)(pPresent->SrcRect.right - pPresent->SrcRect.left),
+                      (UINT)(pPresent->SrcRect.bottom - pPresent->SrcRect.top),
+                      (UINT)(pPresent->DstRect.right - pPresent->DstRect.left),
+                      (UINT)(pPresent->DstRect.bottom - pPresent->DstRect.top),
+                      pPresent->SubRectCnt));
+            LogPresentSurface("destination", pDst);
+            if (flags.Blt)
+            {
+                LogPresentSurface("source", pSrc);
+            }
+        }
+        return pDst == NULL || (flags.Blt && pSrc == NULL) ? STATUS_INVALID_HANDLE : STATUS_ILLEGAL_INSTRUCTION;
     }
     // No stretch: CDD's blts are one to one.
     if (flags.Blt &&
         (pPresent->SrcRect.right - pPresent->SrcRect.left != pPresent->DstRect.right - pPresent->DstRect.left ||
          pPresent->SrcRect.bottom - pPresent->SrcRect.top != pPresent->DstRect.bottom - pPresent->DstRect.top))
     {
-        return STATUS_NOT_SUPPORTED;
+        return STATUS_ILLEGAL_INSTRUCTION;
     }
     if (pPresent->pDmaBuffer == NULL || pPresent->DmaSize < sizeof(UINT) || pPresent->pDmaBufferPrivateData == NULL ||
         pPresent->DmaBufferPrivateDataSize < sizeof(VIOGPU3D_PRESENT_OP))

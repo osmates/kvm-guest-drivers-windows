@@ -221,6 +221,14 @@ class VioGpu3dAllocation
     {
         return m_Primary;
     }
+    UINT GetStandardType() const
+    {
+        return m_StandardType;
+    }
+    UINT GetKind() const
+    {
+        return m_Kind;
+    }
     void SetPrimary(D3DDDI_VIDEO_PRESENT_SOURCE_ID sourceId, UINT width, UINT height, UINT pitch, D3DDDIFORMAT format);
     UINT GetWidth() const
     {
@@ -342,6 +350,10 @@ class VioGpu3dContext
     UINT GetNode() const
     {
         return m_Node;
+    }
+    DXGK_CREATECONTEXTFLAGS GetFlags() const
+    {
+        return m_Flags;
     }
     void SetRootPageTable(const D3DGPU_PHYSICAL_ADDRESS &address, UINT entries)
     {

@@ -100,6 +100,12 @@ merge request 38731): the same tags and layouts.
   (`DmaBufferSegmentSet` 0) made dxgmms2 fault in `AddDmaBufferToPool` (bug check 0x3B). Their blts and fills arrive
   in `DxgkDdiSubmitCommandVirtual`. The contexts of user-mode drivers get no DMA buffer, and their blts and fills are
   refused.
+- A present the driver cannot do fails with a status `DxgkDdiPresent` documents: `STATUS_INVALID_HANDLE` when the
+  allocation list has no surface where the present needs one, `STATUS_ILLEGAL_INSTRUCTION` for one the device cannot
+  run (color keys, rotation, stretch, a surface it cannot copy), and the first eight and every 256th log the context's
+  flags and both surfaces. On a context with virtual addressing dxgkrnl 10.0.26100.9444 passes `DxgkDdiPresent` an
+  array of `DXGK_PRESENTALLOCATIONINFO`, which Microsoft reserves for the system, where `pAllocationList` lives; read as
+  documented, the list names neither surface. So CDD's blts on this adapter fail that way (2026-11-19).
 
 ## Display
 
@@ -127,13 +133,20 @@ merge request 38731): the same tags and layouts.
   `2b0fd564`, which adds `kk: Allow linear 2D color attachments` and `kk: Emit fcanonicalize` to main's Mesa pin;
   Direct3D 12 graphics pipelines need the second (`umd/README.md`). Measured with a host app that has both, not with
   main's.
-- At boot CDD's first four blts on this adapter fail ("present between surfaces it cannot copy"), and dxgkrnl calls
-  the `STATUS_NOT_SUPPORTED` they return an invalid status for `DxgkDdiPresent` (2026-11-19). The desktop shows from
-  DWM's first flip on.
+- At boot CDD's first blts on this adapter (four, full screen, its shadow surface to the primary) fail with
+  `STATUS_INVALID_HANDLE`, and dxgkrnl logs "PresentFromCdd ... failed" for each (above). The desktop shows from DWM's
+  first flip on. With the system node in physical mode (Triton's contexts on node 1) dxgkrnl passes the documented
+  list and no present fails, but VidMm maps CDD's shadow surface into no aperture, so the work thread has no CPU view
+  of it and copies nothing (measured 2026-11-19, not in this tree).
 - dxgkrnl logs "The root page directory is not set" on the DMA packets of processes that map no GPU virtual address
   (Venus maps none), and refuses Venus's hardware queue context while the driver reports WDDM 2.0 ("the driver WDDM
   version is < 2.5"); Venus then opens a context per ring.
-- Basic Display keeps a second output to the right of this adapter's: Windows extends the desktop onto it.
+- Basic Display drives the firmware's framebuffer from a root device of its own beside this adapter, as beside
+  viogpudo. OSMates' guest agent has Windows show the GPU's output alone (its `display` command at the first logon,
+  `display/set` when the host sets the display), which Windows keeps in its display configuration database: with that
+  entry Windows shows one display, this adapter's, at boot and after a sign-in. With no entry for the monitors it
+  extends the desktop onto Basic Display's output at boot, until the agent's next `display/set` (measured 2026-11-19).
+  No documented DDI or callback retires that Basic Display or chooses Windows' topology.
 - `SupportPerEngineTDR` stays off: with it dxgkrnl refuses to start the adapter.
 - A D3D9 DDI. D3D9 lists this adapter now that it drives the display, and a HAL device fails with
   `D3DERR_NOTAVAILABLE`; apps that call `Direct3DCreate9On12` get a HAL device through D3D9On12 (2026-11-19).
