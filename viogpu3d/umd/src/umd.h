@@ -87,6 +87,34 @@ void umd_device_callbacks_init12(struct umd_device *dev,
                                  const struct D3D12DDI_CORELAYER_DEVICECALLBACKS_0022 *coreLayer);
 void umd_device_callbacks_fini(struct umd_device *dev);
 
+// A monitored fence a kernel context signals and the CPU waits for, made at the first signal.
+struct umd_context_mark
+{
+    SRWLOCK lock;
+    D3DKMT_HANDLE fence;
+    const volatile UINT64 *cpu;
+    UINT64 value;
+    HANDLE event;
+    BOOL failed;
+    // For a line every UMD_CONTEXT_MARK_REPORT waits: their count, time and longest, and the ones not done in time.
+    LONG64 waits;
+    LONG64 waitedQpc;
+    LONG64 longestQpc;
+    LONG64 late;
+};
+
+#define UMD_CONTEXT_MARK_REPORT 600
+
+// Signals the next value on hContext, which the caller drives alone; FALSE with no fence or a failed signal.
+BOOL umd_context_mark_signal(struct umd_device *dev, struct umd_context_mark *mark, HANDLE hContext, UINT64 *value);
+// Waits on the CPU, at most timeoutMs, until the fence reaches value; what names the wait in the log.
+BOOL umd_context_mark_wait(struct umd_device *dev,
+                           struct umd_context_mark *mark,
+                           UINT64 value,
+                           DWORD timeoutMs,
+                           const char *what);
+void umd_context_mark_fini(struct umd_device *dev, struct umd_context_mark *mark);
+
 // The ICD's vkGetInstanceProcAddr with this driver's hooks, which vkd3d-proton loads Vulkan through; NULL without
 // the ICD.
 PFN_vkGetInstanceProcAddr umd_vk_loader(void);

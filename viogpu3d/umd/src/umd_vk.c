@@ -519,3 +519,205 @@ void umd_device_callbacks_fini(struct umd_device *dev)
     ReleaseSRWLockExclusive(&umd_devices_lock);
     dev->next = NULL;
 }
+
+// A 32-bit process reads the 64-bit value in two halves: the same value twice is one value.
+static UINT64 umd_context_mark_read(const struct umd_context_mark *mark)
+{
+    UINT64 a = *mark->cpu;
+    UINT64 b = *mark->cpu;
+
+    while (a != b)
+    {
+        a = b;
+        b = *mark->cpu;
+    }
+    return a;
+}
+
+static BOOL umd_context_mark_init(struct umd_device *dev, struct umd_context_mark *mark)
+{
+    const D3DDDI_DEVICECALLBACKS *kt = &dev->ktCallbacks;
+    D3DDDICB_CREATESYNCHRONIZATIONOBJECT2 create;
+    HRESULT hr;
+
+    mark->failed = TRUE;
+    if (kt->pfnCreateSynchronizationObject2Cb == NULL || kt->pfnWaitForSynchronizationObjectFromCpuCb == NULL ||
+        (kt->pfnSignalSynchronizationObjectFromGpuCb == NULL && kt->pfnSignalSynchronizationObjectFromGpu2Cb == NULL))
+    {
+        umd_log("context mark: the runtime gives no monitored fence callbacks");
+        return FALSE;
+    }
+    memset(&create, 0, sizeof(create));
+    create.Info.Type = D3DDDI_MONITORED_FENCE;
+    create.Info.MonitoredFence.InitialFenceValue = 0;
+    hr = kt->pfnCreateSynchronizationObject2Cb(dev->hRTDevice, &create);
+    if (FAILED(hr) || create.hSyncObject == 0 || create.Info.MonitoredFence.FenceValueCPUVirtualAddress == NULL)
+    {
+        umd_log("context mark: no monitored fence: 0x%08lx", (unsigned long)hr);
+        return FALSE;
+    }
+    mark->fence = create.hSyncObject;
+    mark->cpu = (const volatile UINT64 *)create.Info.MonitoredFence.FenceValueCPUVirtualAddress;
+    mark->event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (mark->event == NULL)
+    {
+        umd_log("context mark: no event");
+        return FALSE;
+    }
+    mark->failed = FALSE;
+    return TRUE;
+}
+
+BOOL umd_context_mark_signal(struct umd_device *dev, struct umd_context_mark *mark, HANDLE hContext, UINT64 *value)
+{
+    const D3DDDI_DEVICECALLBACKS *kt = &dev->ktCallbacks;
+    HRESULT hr;
+    UINT64 next;
+
+    AcquireSRWLockExclusive(&mark->lock);
+    if (hContext == NULL || mark->failed || (mark->fence == 0 && !umd_context_mark_init(dev, mark)))
+    {
+        ReleaseSRWLockExclusive(&mark->lock);
+        return FALSE;
+    }
+    next = mark->value + 1;
+    if (kt->pfnSignalSynchronizationObjectFromGpuCb != NULL)
+    {
+        D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMGPU signal;
+
+        memset(&signal, 0, sizeof(signal));
+        signal.hContext = hContext;
+        signal.ObjectCount = 1;
+        signal.ObjectHandleArray = &mark->fence;
+        signal.MonitoredFenceValueArray = &next;
+        hr = kt->pfnSignalSynchronizationObjectFromGpuCb(dev->hRTDevice, &signal);
+    }
+    else if (kt->pfnSignalSynchronizationObjectFromGpu2Cb != NULL)
+    {
+        D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 signal;
+
+        memset(&signal, 0, sizeof(signal));
+        signal.ObjectCount = 1;
+        signal.ObjectHandleArray = &mark->fence;
+        signal.BroadcastContextCount = 1;
+        signal.BroadcastContextArray = &hContext;
+        signal.MonitoredFenceValueArray = &next;
+        hr = kt->pfnSignalSynchronizationObjectFromGpu2Cb(dev->hRTDevice, &signal);
+    }
+    else
+    {
+        ReleaseSRWLockExclusive(&mark->lock);
+        return FALSE;
+    }
+    if (FAILED(hr))
+    {
+        ReleaseSRWLockExclusive(&mark->lock);
+        umd_log("context mark: the kernel context's signal of %llu failed 0x%08lx",
+                (unsigned long long)next,
+                (unsigned long)hr);
+        return FALSE;
+    }
+    mark->value = next;
+    ReleaseSRWLockExclusive(&mark->lock);
+    *value = next;
+    return TRUE;
+}
+
+static LONG64 umd_qpc(void)
+{
+    LARGE_INTEGER t;
+
+    QueryPerformanceCounter(&t);
+    return t.QuadPart;
+}
+
+static void umd_context_mark_count(struct umd_context_mark *mark, LONG64 took, BOOL done, const char *what)
+{
+    LARGE_INTEGER frequency;
+    LONG64 waits;
+    LONG64 waited;
+    LONG64 longest;
+    LONG64 late;
+
+    mark->waits++;
+    mark->waitedQpc += took;
+    mark->longestQpc = took > mark->longestQpc ? took : mark->longestQpc;
+    mark->late += done ? 0 : 1;
+    if (mark->waits < UMD_CONTEXT_MARK_REPORT)
+    {
+        return;
+    }
+    waits = mark->waits;
+    waited = mark->waitedQpc;
+    longest = mark->longestQpc;
+    late = mark->late;
+    mark->waits = mark->waitedQpc = mark->longestQpc = mark->late = 0;
+    QueryPerformanceFrequency(&frequency);
+    umd_log("%s count: %lld waits for the kernel context, %lld us on average, %lld us at most, %lld not done in time",
+            what,
+            (long long)waits,
+            (long long)(waited * 1000000 / waits / frequency.QuadPart),
+            (long long)(longest * 1000000 / frequency.QuadPart),
+            (long long)late);
+}
+
+BOOL umd_context_mark_wait(struct umd_device *dev,
+                           struct umd_context_mark *mark,
+                           UINT64 value,
+                           DWORD timeoutMs,
+                           const char *what)
+{
+    const D3DDDI_DEVICECALLBACKS *kt = &dev->ktCallbacks;
+    D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait;
+    const LONG64 t0 = umd_qpc();
+    ULONGLONG deadline;
+    BOOL done = TRUE;
+    HRESULT hr;
+
+    // One waiter at a time: the event is auto-reset, so a second one could take the first one's wake.
+    AcquireSRWLockExclusive(&mark->lock);
+    // A wake from an earlier registration that timed out is told apart by the fence's value.
+    deadline = GetTickCount64() + timeoutMs;
+    while (umd_context_mark_read(mark) < value)
+    {
+        ULONGLONG now = GetTickCount64();
+
+        if (now >= deadline)
+        {
+            done = FALSE;
+            break;
+        }
+        memset(&wait, 0, sizeof(wait));
+        wait.ObjectCount = 1;
+        wait.ObjectHandleArray = &mark->fence;
+        wait.FenceValueArray = &value;
+        wait.hAsyncEvent = mark->event;
+        hr = kt->pfnWaitForSynchronizationObjectFromCpuCb(dev->hRTDevice, &wait);
+        if (FAILED(hr))
+        {
+            umd_log("%s: the CPU wait for %llu failed 0x%08lx", what, (unsigned long long)value, (unsigned long)hr);
+            done = FALSE;
+            break;
+        }
+        WaitForSingleObject(mark->event, (DWORD)(deadline - now));
+    }
+    umd_context_mark_count(mark, umd_qpc() - t0, done, what);
+    ReleaseSRWLockExclusive(&mark->lock);
+    return done;
+}
+
+void umd_context_mark_fini(struct umd_device *dev, struct umd_context_mark *mark)
+{
+    if (mark->fence != 0 && dev->ktCallbacks.pfnDestroySynchronizationObjectCb != NULL)
+    {
+        D3DDDICB_DESTROYSYNCHRONIZATIONOBJECT destroy;
+
+        destroy.hSyncObject = mark->fence;
+        dev->ktCallbacks.pfnDestroySynchronizationObjectCb(dev->hRTDevice, &destroy);
+    }
+    if (mark->event != NULL)
+    {
+        CloseHandle(mark->event);
+    }
+    memset(mark, 0, sizeof(*mark));
+}

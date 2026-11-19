@@ -75,12 +75,13 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
   while their frame's fence had not yet read done. Composited surfaces (an app's windowed swapchain) already wait on
   the CPU for their frame before the present (Triton).
 - `VIOGPU3D_UMD_DEBUG=frame_trace` logs lines with the time (`QueryPerformanceCounter`) for each Direct3D 12 present
-  (its companion's host resource, the queue's drain values) and each `ExecuteCommandLists` (the present whose copy
-  it carries), and in a Direct3D 11 process (DWM) each open of another process's texture (its host resource), the
-  first bind of such a texture in each of the device's frames, each flip of a scanout primary (the frame's fence value
-  and its completed value, the flip gate's value) and, from a thread, each value the gate's semaphore reaches. A
-  flip's values also go to the kernel driver as the present's private data, which it logs with the time it sets the
-  source address. With `no_flip_gate` too, the semaphore is still signalled, for the trace, and nothing waits for it.
+  (its companion's host resource, the queue's drain values) and each `ExecuteCommandLists` (the present whose copy it
+  carries), and in a Direct3D 11 process (DWM) each open of another process's texture (its host
+  resource), the first bind of such a texture in each of the device's frames, each flip of a scanout primary (the
+  frame's fence value and its completed value, the flip gate's value) and, from a thread, each value the gate's
+  semaphore reaches. A flip's values also go to the kernel driver as the present's private data, which it logs with
+  the time it sets the source address. With `no_flip_gate` too, the semaphore is still signalled, for the trace, and
+  nothing waits for it.
 - The driver's lines and DXVK's go to `OutputDebugString`. With `VIOGPU3D_UMD_LOG` naming a folder, each process also
   appends them to `<folder>\<exe>-<pid>.log`: LogonUI and DWM run in a session no debug-output collector reaches, and
   a machine-wide variable (`setx /M`, then a restart) reaches them.
@@ -143,7 +144,9 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
   packet given to it so far: the context signals a monitored fence of the runtime's
   (`pfnSignalSynchronizationObjectFromGpuCb`) and the CPU waits for it (`pfnWaitForSynchronizationObjectFromCpuCb`
   with an event, then the fence's CPU value). `VIOGPU3D_UMD_DEBUG=no_companion_wait` leaves it out. A queue that waits
-  for a fence the app signals from the CPU only after its present would hold each such present for that second.
+  for a fence the app signals from the CPU only after its present would hold each such present for that second. The
+  monitored fence comes from a helper (`umd_context_mark_*`, `src/umd_vk.c`); every 600 waits the log has a
+  `companion wait count:` line with their average and longest time and how many ran out their second.
 - Heaps and committed resources with no shared surface get a kernel allocation that names no memory
   (`VIOGPU3D_ALLOCATE_EMPTY_TAG` of `shared/viogpu3d_uapi.h`), because the runtime answers `SetResidencyPriority`
   itself and refuses an object without an allocation.
@@ -369,6 +372,11 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
   With the companion wait, on one boot, `frame_trace` on: none of 324 shots torn, against 115 of 338 without it; the
   waits took 22 ms (median), DWM sampled a companion while its copy ran for 2 of 3508 presents (3789 of 3897
   without), and the triangle presented 33.6 frames a second (36.5 without).
+- Frames without `frame_trace` (2026-11-19, screenshots two to three times a second, judged by the triangle's edges
+  with the rows under the pointer left out): the Direct3D 12 triangle none of 354 shots torn with the companion wait
+  and 72 of 246 without it on one boot, at 30.7 and 33.3 presents a second; the waits took 19 to 22 ms on average, at
+  most 107 ms, and none ran out its second. `flash.c`'s Direct3D 12 window with the wait: none of 171 and of 231 shots
+  torn, at 31.4 and 33.6 a second.
 
 ## Unproven, and not done
 
@@ -392,7 +400,6 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
 - No D3D9 DDI.
 - The flip gate: that a gated flip's frame is done when the kernel sets its source address (the trace shows the flip
   held; the kernel driver logs the frame's completed value at the present only).
-- The companion wait without `frame_trace`: every run above had it on.
 - Direct3D 11 windows: the triangle tore in 6 of 912 shots (above), frames in bands; the app's next frame and DWM's
   sampling of a buffer run on Venus, which the runtime's waits between them do not hold. Direct3D 12: the runtime
   hands DWM a buffer before the driver's Present for it, so DWM may compose a companion's earlier frame; the companion
