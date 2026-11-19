@@ -57,7 +57,13 @@ display-only driver in `viogpu` stays as it is.
 - A DMA buffer completes once every fenced command it sent has signalled, in the order the scheduler gave them.
 - One Venus context of the driver's own, made at start, which gets no Venus command: its blobs are plain shared
   memory on the host.
-- Preemption only between DMA buffers: a preemption is reported once the node has nothing left.
+- Preemption only between DMA buffers: a preemption is reported once the node has nothing left; the first 64 and
+  every 256th that wait for a node's buffers are logged with its fences.
+- At a GPU timeout (bug check 0x117 or 0x141) `DxgkDdiCollectDbgInfo` writes the nodes with buffers not done (their
+  last submitted and completed fences, the oldest buffer's fence and how many host signals it still waits for) and the
+  EXEC_BUF fences the host has not signalled into the dump's driver data (`viogpu3d debug info: ...`), and logs them;
+  `DxgkDdiResetFromTimeout` and `DxgkDdiResetEngine` log the same. For any other bug check, where dxgkrnl may call it
+  at any IRQL, it leaves the driver data empty.
 
 ## Interface for user-mode drivers
 

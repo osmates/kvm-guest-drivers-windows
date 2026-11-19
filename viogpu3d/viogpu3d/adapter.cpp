@@ -1410,6 +1410,9 @@ NTSTATUS VioGpu3dAdapter::ResetEngine(_Inout_ DXGKARG_RESETENGINE *pResetEngine)
     {
         return STATUS_INVALID_PARAMETER;
     }
+    CHAR text[480];
+    DescribeNodes(text, sizeof(text));
+    DbgPrint(TRACE_LEVEL_ERROR, ("reset engine: node %u, %s\n", pResetEngine->NodeOrdinal, text));
     // The host runs what it was given; this engine's waits are given up, and their fences reported done.
     KIRQL irql;
     KeAcquireSpinLock(&m_NodeLock, &irql);
@@ -1433,9 +1436,33 @@ NTSTATUS VioGpu3dAdapter::ResetEngine(_Inout_ DXGKARG_RESETENGINE *pResetEngine)
     return STATUS_SUCCESS;
 }
 
+// Only for a TDR or engine timeout, at PASSIVE_LEVEL; the text goes into the dump as the driver's data.
+NTSTATUS VioGpu3dAdapter::CollectDbgInfo(_In_ CONST DXGKARG_COLLECTDBGINFO *pCollectDbgInfo)
+{
+    PAGED_CODE();
+
+    CHAR text[480];
+    DescribeNodes(text, sizeof(text));
+    DbgPrint(TRACE_LEVEL_ERROR, ("collect debug info: reason 0x%x, %s\n", pCollectDbgInfo->Reason, text));
+    if (pCollectDbgInfo->pBuffer != NULL && pCollectDbgInfo->BufferSize > 0)
+    {
+        RtlZeroMemory(pCollectDbgInfo->pBuffer, pCollectDbgInfo->BufferSize);
+        RtlStringCbPrintfA((PCHAR)pCollectDbgInfo->pBuffer,
+                           pCollectDbgInfo->BufferSize,
+                           "viogpu3d debug info: reason 0x%x, %s",
+                           pCollectDbgInfo->Reason,
+                           text);
+    }
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS VioGpu3dAdapter::ResetFromTimeout(VOID)
 {
     PAGED_CODE();
+
+    CHAR text[480];
+    DescribeNodes(text, sizeof(text));
+    DbgPrint(TRACE_LEVEL_ERROR, ("reset from timeout: %s\n", text));
 
     KIRQL irql;
     KeAcquireSpinLock(&m_NodeLock, &irql);
@@ -1478,6 +1505,84 @@ PAGED_CODE_SEG_END
 //
 // Non-paged code: interrupts, DPCs and what they call.
 //
+
+// Not paged: it holds m_NodeLock.
+void VioGpu3dAdapter::DescribeNodes(_Out_writes_bytes_(size) PCHAR pText, SIZE_T size)
+{
+    struct
+    {
+        UINT Node, Buffers, Submitted, Completed, Oldest;
+        LONG Outstanding;
+        BOOLEAN Preempt;
+    } busy[5];
+    UINT count = 0, total = 0, unsignaled = 0;
+    ULONGLONG oldestFence = 0;
+    KIRQL irql;
+    KeAcquireSpinLock(&m_NodeLock, &irql);
+    for (UINT node = 0; node < VIOGPU3D_NODE_COUNT; node++)
+    {
+        VIOGPU3D_NODE_STATE *pNode = &m_Nodes[node];
+        if (IsListEmpty(&pNode->Pending))
+        {
+            continue;
+        }
+        total++;
+        if (count < ARRAYSIZE(busy))
+        {
+            UINT buffers = 0;
+            for (PLIST_ENTRY p = pNode->Pending.Flink; p != &pNode->Pending; p = p->Flink)
+            {
+                buffers++;
+            }
+            const VIOGPU3D_DMA *pOldest = CONTAINING_RECORD(pNode->Pending.Flink, VIOGPU3D_DMA, Link);
+            busy[count].Node = node;
+            busy[count].Buffers = buffers;
+            busy[count].Submitted = pNode->LastSubmitted;
+            busy[count].Completed = pNode->LastCompleted;
+            busy[count].Oldest = pOldest->FenceId;
+            busy[count].Outstanding = pOldest->Outstanding;
+            busy[count].Preempt = pNode->PreemptRequested;
+            count++;
+        }
+    }
+    for (PLIST_ENTRY p = m_EscapeFences.Flink; p != &m_EscapeFences; p = p->Flink)
+    {
+        const VIOGPU3D_ESCAPE_FENCE *pFence = CONTAINING_RECORD(p, VIOGPU3D_ESCAPE_FENCE, Link);
+        if (!pFence->Signaled && (unsignaled++ == 0 || pFence->FenceId < oldestFence))
+        {
+            oldestFence = pFence->FenceId;
+        }
+    }
+    KeReleaseSpinLock(&m_NodeLock, irql);
+
+    PCHAR end = pText;
+    size_t left = size;
+    RtlStringCbPrintfExA(end,
+                         left,
+                         &end,
+                         &left,
+                         0,
+                         "%u nodes busy, %u EXEC_BUF fences unsignalled (oldest %llu)",
+                         total,
+                         unsignaled,
+                         oldestFence);
+    for (UINT i = 0; i < count; i++)
+    {
+        RtlStringCbPrintfExA(end,
+                             left,
+                             &end,
+                             &left,
+                             0,
+                             "; node %u: %u buffers, submitted %u, completed %u, oldest %u waits for %ld%s",
+                             busy[i].Node,
+                             busy[i].Buffers,
+                             busy[i].Submitted,
+                             busy[i].Completed,
+                             busy[i].Oldest,
+                             busy[i].Outstanding,
+                             busy[i].Preempt ? ", preemption asked" : "");
+    }
+}
 
 VOID VioGpu3dAdapter::ResetDevice(VOID)
 {
@@ -1795,6 +1900,21 @@ NTSTATUS VioGpu3dAdapter::PreemptCommand(_In_ CONST DXGKARG_PREEMPTCOMMAND *pPre
     {
         pNode->PreemptRequested = TRUE;
         pNode->PreemptionFenceId = pPreemptCommand->PreemptionFenceId;
+        static LONG waiting;
+        LONG n = InterlockedIncrement(&waiting);
+        if (n <= 64 || n % 256 == 0)
+        {
+            const VIOGPU3D_DMA *pOldest = CONTAINING_RECORD(pNode->Pending.Flink, VIOGPU3D_DMA, Link);
+            DbgPrint(TRACE_LEVEL_INFORMATION,
+                     ("preemption #%ld waits: node %u, fence %u, submitted %u, completed %u, oldest %u waits for %ld\n",
+                      n,
+                      node,
+                      pPreemptCommand->PreemptionFenceId,
+                      pNode->LastSubmitted,
+                      pNode->LastCompleted,
+                      pOldest->FenceId,
+                      pOldest->Outstanding));
+        }
     }
     KeReleaseSpinLock(&m_NodeLock, irql);
     return STATUS_SUCCESS;

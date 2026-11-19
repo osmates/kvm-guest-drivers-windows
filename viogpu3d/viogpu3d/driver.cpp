@@ -525,17 +525,6 @@ NTSTATUS APIENTRY VioGpu3dEscape(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_
     return Adapter(hAdapter)->Escape(pEscape);
 }
 
-NTSTATUS APIENTRY VioGpu3dCollectDbgInfo(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_COLLECTDBGINFO *pCollectDbgInfo)
-{
-    PAGED_CODE();
-    UNREFERENCED_PARAMETER(hAdapter);
-    if (pCollectDbgInfo->pBuffer != NULL && pCollectDbgInfo->BufferSize > 0)
-    {
-        RtlZeroMemory(pCollectDbgInfo->pBuffer, pCollectDbgInfo->BufferSize);
-    }
-    return STATUS_SUCCESS;
-}
-
 NTSTATUS APIENTRY VioGpu3dQueryCurrentFence(_In_ CONST HANDLE hAdapter,
                                             _Inout_ DXGKARG_QUERYCURRENTFENCE *pCurrentFence)
 {
@@ -796,6 +785,21 @@ NTSTATUS APIENTRY VioGpu3dSubmitCommand(_In_ CONST HANDLE hAdapter, _In_ CONST D
 NTSTATUS APIENTRY VioGpu3dPreemptCommand(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_PREEMPTCOMMAND *pPreemptCommand)
 {
     return Adapter(hAdapter)->PreemptCommand(pPreemptCommand);
+}
+
+// dxgkrnl calls it at any IRQL before a bug check, and at PASSIVE_LEVEL only for a timeout.
+NTSTATUS APIENTRY VioGpu3dCollectDbgInfo(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_COLLECTDBGINFO *pCollectDbgInfo)
+{
+    if (pCollectDbgInfo->Reason == VIDEO_TDR_TIMEOUT_DETECTED ||
+        pCollectDbgInfo->Reason == VIDEO_ENGINE_TIMEOUT_DETECTED)
+    {
+        return Adapter(hAdapter)->CollectDbgInfo(pCollectDbgInfo);
+    }
+    if (pCollectDbgInfo->pBuffer != NULL && pCollectDbgInfo->BufferSize > 0)
+    {
+        RtlZeroMemory(pCollectDbgInfo->pBuffer, pCollectDbgInfo->BufferSize);
+    }
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS APIENTRY VioGpu3dSetVidPnSourceAddress(_In_ CONST HANDLE hAdapter,

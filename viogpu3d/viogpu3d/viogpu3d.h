@@ -494,6 +494,7 @@ class VioGpu3dAdapter final : IVioGpuPCI
     VOID DpcRoutine(VOID);
     NTSTATUS QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQueryAdapterInfo);
     NTSTATUS Escape(_In_ CONST DXGKARG_ESCAPE *pEscape);
+    NTSTATUS CollectDbgInfo(_In_ CONST DXGKARG_COLLECTDBGINFO *pCollectDbgInfo);
     NTSTATUS StopDeviceAndReleasePostDisplayOwnership(_In_ D3DDDI_VIDEO_PRESENT_TARGET_ID TargetId,
                                                       _Out_ DXGK_DISPLAY_INFORMATION *pDisplayInfo);
 
@@ -601,6 +602,8 @@ class VioGpu3dAdapter final : IVioGpuPCI
     NTSTATUS EscapeCapset(_Inout_ VIRTIO_WDDM_CAPSET *pCapset, UINT size);
     NTSTATUS EscapeResourceInfo(_Inout_ VIRTIO_WDDM_RESOURCE_INFO *pInfo);
     NTSTATUS EscapeBlobMap(_Inout_ VIRTIO_WDDM_BLOB_MAP *pMap);
+    // The nodes with buffers not yet done, and the EXEC_BUF fences the host has not signalled, as text.
+    void DescribeNodes(_Out_writes_bytes_(size) PCHAR pText, SIZE_T size);
 
     NTSTATUS QuerySegment4(_In_ CONST DXGKARG_QUERYADAPTERINFO *pQuery);
 
