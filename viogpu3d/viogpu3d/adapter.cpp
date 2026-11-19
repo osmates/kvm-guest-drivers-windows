@@ -1333,6 +1333,30 @@ void VioGpu3dAdapter::RunPresentOp(_In_ const VIOGPU3D_PRESENT_OP *pOp)
         drawnRight = max(drawnRight, right);
         drawnBottom = max(drawnBottom, bottom);
     }
+    static LONG ran;
+    LONG n = InterlockedIncrement(&ran);
+    if (n <= 64 || n % 256 == 0)
+    {
+        const VioGpu3dAllocation *pFrom = pOp->Kind == VIOGPU3D_PRESENT_BLT ? pOp->Source : NULL;
+        DbgPrint(TRACE_LEVEL_INFORMATION,
+                 ("present op #%ld ran: %s, source kind %u type %u %ux%u, destination kind %u type %u %ux%u, %u rects, "
+                  "drawn %ld,%ld to %ld,%ld\n",
+                  n,
+                  pOp->Kind == VIOGPU3D_PRESENT_BLT ? "blt" : "fill",
+                  pFrom != NULL ? pFrom->GetKind() : 0,
+                  pFrom != NULL ? pFrom->GetStandardType() : 0,
+                  pFrom != NULL ? pFrom->GetWidth() : 0,
+                  pFrom != NULL ? pFrom->GetHeight() : 0,
+                  pOp->Destination->GetKind(),
+                  pOp->Destination->GetStandardType(),
+                  pOp->Destination->GetWidth(),
+                  pOp->Destination->GetHeight(),
+                  pOp->RectCount,
+                  drawnLeft < drawnRight ? drawnLeft : 0,
+                  drawnLeft < drawnRight ? drawnTop : 0,
+                  drawnRight,
+                  drawnBottom));
+    }
     // The host copies a shown blob again at a flush of the rectangle.
     if (drawnLeft < drawnRight && pOp->Destination->IsBlob() && vidpn->IsShowing(pOp->Destination))
     {

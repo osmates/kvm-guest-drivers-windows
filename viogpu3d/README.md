@@ -111,7 +111,8 @@ merge request 38731): the same tags and layouts.
   DMA buffer CDD's device on this adapter failed in its first context ("Couldn't allocate a contiguous buffer for the
   DMA buffer"), and one in contiguous memory (`DmaBufferSegmentSet` 0) on a virtual context made dxgmms2 fault in
   `AddDmaBufferToPool` (bug check 0x3B). The contexts of user-mode drivers get no DMA buffer, and their blts and fills
-  are refused. The first 16 and every 256th present on a physical context log both surfaces' segment and address.
+  are refused. The first 16 and every 256th present on a physical context log both surfaces' segment and address, and
+  the first 64 and every 256th blt or fill the work thread runs logs both surfaces' kinds and the rectangle it drew.
 - A present the driver cannot do fails with a status `DxgkDdiPresent` documents: `STATUS_INVALID_HANDLE` when the
   allocation list has no surface where the present needs one, `STATUS_ILLEGAL_INSTRUCTION` for one the device cannot
   run (color keys, rotation, stretch, a surface it cannot copy), and the first eight and every 256th log the context's
