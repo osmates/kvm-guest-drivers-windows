@@ -416,6 +416,31 @@ t12PresentCompanionCopy(PTRITON12_QUEUE q, PTRITON12_RESOURCE src)
     }
 }
 
+static LONG64
+t12Qpc(void)
+{
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return t.QuadPart;
+}
+
+// frame_trace: the present, its companion's host resource and the queue's drain values.
+static void
+t12TracePresent(PTRITON12_QUEUE q, LONG n, PTRITON12_RESOURCE src)
+{
+    const BOOL trace = triton_backend_debug(TRITON_DEBUG_FRAME_TRACE);
+    if (trace && n == 1) {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        TR_LOG("12.trace qpc frequency %lld", (long long)f.QuadPart);
+    }
+    if (trace)
+        TR_LOG("12.trace present %ld res %u alloc 0x%x drain done %llu sent %llu qpc %lld", (long)n,
+               triton12_backend_surface_id(src), src->hKMAllocation,
+               (unsigned long long)ID3D12Fence_GetCompletedValue(q->pDrainFence),
+               (unsigned long long)t12Load64(&q->DrainVisible), (long long)t12Qpc());
+}
+
 static VOID APIENTRY
 t12Present(D3D12DDI_HCOMMANDLIST hList, D3D12DDI_HCOMMANDQUEUE hQueue,
            const D3D12DDIARG_PRESENT_0001 *pArgs, D3D12DDI_PRESENT_0003 *pOut)
@@ -465,9 +490,12 @@ t12Present(D3D12DDI_HCOMMANDLIST hList, D3D12DDI_HCOMMANDQUEUE hQueue,
      * update and draw there) would show the previous frame. */
     const BOOL blt = pArgs->Flags.Blt ? TRUE : FALSE;
     if (src && src->pCompanion && src->pResource) {
+        if (q->pDrainFence)
+            t12TracePresent(q, n, src);
         if (blt && l && l->pList && !l->AwaitingReset) {
             t12RecordCompanionFill(l->pList, src);
             pOut->AddedGpuWork = TRUE;
+            l->TracePresent = n;
         } else if (q->pQueue) {
             t12PresentCompanionCopy(q, src);
             /* A blt present's copy went to the inner queue directly, past

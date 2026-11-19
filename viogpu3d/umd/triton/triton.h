@@ -195,6 +195,8 @@ typedef struct TRITON_DEVICE {
      * so DestroyDevice must wait for this to reach zero before touching
      * anything it uses. */
     volatile LONG                   presentInFlight;
+    // VIOGPU3D_UMD_DEBUG=frame_trace: this device's flips so far, which numbers the frames its sample lines name.
+    volatile LONG                   traceFrame;
 
     /* Stretch/convert blit rig for the DXGI Blt DDI (tritonDxgiBltStretch):
      * a plain CopySubresourceRegion cannot stretch and the host silently
@@ -341,6 +343,10 @@ typedef struct TRITON_RESOURCE {
 
     /* Head of the intrusive list of live views wrapping this resource. */
     TRITON_VIEWLINK       *pViewList;
+
+    // frame_trace: an opened texture's host resource id, and the last frame whose sample line named it.
+    UINT                   TraceResId;
+    LONG                   TraceFrame;
 } TRITON_RESOURCE, *PTRITON_RESOURCE;
 
 /* Views keep the host desc they were created with, so recreating them after

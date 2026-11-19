@@ -228,7 +228,7 @@ tritonGateTraceMs(void)
 }
 
 static void
-tritonPresentFlushAndGate(PTRITON_DEVICE pD, BOOL arm, BOOL wait, UINT64 *pFlipGate)
+tritonPresentFlushAndGate(PTRITON_DEVICE pD, BOOL arm, BOOL wait, UINT64 *pFlipGate, UINT64 *pFrame)
 {
    if (!pD->pCtx1)
       return;
@@ -319,6 +319,11 @@ tritonPresentFlushAndGate(PTRITON_DEVICE pD, BOOL arm, BOOL wait, UINT64 *pFlipG
    /* The KMD has no flip gate: the backend orders this flip after the frame. */
    if (pFlipGate && !wait)
       *pFlipGate = triton_backend_flip_signal(pD, v != 0 && done >= v);
+   // frame_trace: the frame's fence value and its completed value when the flip is handed over.
+   if (pFrame) {
+      pFrame[0] = v;
+      pFrame[1] = done;
+   }
    LeaveCriticalSection(&pD->presentLock);
    pt_arm = TRITON_PT_NOW();
 
@@ -532,7 +537,7 @@ tritonPresentFlushAndGate(PTRITON_DEVICE pD, BOOL arm, BOOL wait, UINT64 *pFlipG
  * all share pD->hKMContext, and only one thread may drive an HCONTEXT at a
  * time (see kmCtxLock in triton.h). */
 static HRESULT
-tritonPresentSubmitCb(PTRITON_DEVICE pD, DXGIDDICB_PRESENT *cb, UINT64 flipGate)
+tritonPresentSubmitCb(PTRITON_DEVICE pD, DXGIDDICB_PRESENT *cb, UINT64 flipGate, const UINT64 *pFrame)
 {
    if (!pD->presentLockInit)
       return pD->pfnPresentCb(pD->hRTDevice.handle, cb);
@@ -540,7 +545,17 @@ tritonPresentSubmitCb(PTRITON_DEVICE pD, DXGIDDICB_PRESENT *cb, UINT64 flipGate)
    EnterCriticalSection(&pD->kmCtxLock);
    if (flipGate)
       triton_backend_flip_wait(pD, flipGate);
+   if (pFrame && triton_backend_debug(TRITON_DEBUG_FRAME_TRACE))
+      triton_backend_flip_trace(pD, cb, pFrame[0], pFrame[1], flipGate);
    HRESULT hr = pD->pfnPresentCb(pD->hRTDevice.handle, cb);
+   if (FAILED(hr) && cb->pPrivateDriverData) {
+      static LONG refusedN;
+      if (InterlockedIncrement(&refusedN) == 1)
+         TR_LOG("trace: a flip with private data failed 0x%08lx; flips go without it", (unsigned long)hr);
+      cb->pPrivateDriverData = NULL;
+      cb->PrivateDriverDataSize = 0;
+      hr = pD->pfnPresentCb(pD->hRTDevice.handle, cb);
+   }
    LeaveCriticalSection(&pD->kmCtxLock);
    if (triton_backend_debug(TRITON_DEBUG_PRESENT_TIMING))
       InterlockedAdd64(&g_pt.cb_us, (LONG64)(TRITON_PT_NOW() - t0));
@@ -607,8 +622,11 @@ tritonDxgiPresent(DXGI_DDI_ARG_PRESENT *pArgs)
       tritonPresentUnlock(pD);
    }
    UINT64 flipGate = 0;
+   UINT64 frame[2] = {0, 0};
    tritonPresentFlushAndGate(pD, TRUE /* arm */, !src->IsPresentable /* wait */,
-                             src->IsPresentable ? &flipGate : NULL);
+                             src->IsPresentable ? &flipGate : NULL, frame);
+   if (src->IsPresentable)
+      InterlockedIncrement(&pD->traceFrame);
 
    /* DXGIDDICB_PRESENT (MSDN):
     *   hSrcAllocation  the rendered back buffer to present (a flip-primary
@@ -622,7 +640,7 @@ tritonDxgiPresent(DXGI_DDI_ARG_PRESENT *pArgs)
    cb.hDstAllocation = dst ? dst->hKMAllocation : 0;
    cb.pDXGIContext   = pArgs->pDXGIContext;
    cb.hContext       = pD->hKMContext;
-   HRESULT hr = tritonPresentSubmitCb(pD, &cb, flipGate);
+   HRESULT hr = tritonPresentSubmitCb(pD, &cb, flipGate, src->IsPresentable ? frame : NULL);
    InterlockedDecrement(&pD->presentInFlight);
    return hr;
 }
@@ -1124,7 +1142,7 @@ tritonDxgiBltCommon(DXGI_DDI_HDEVICE hDevice,
                                               (DXGI_FORMAT)dst->Format);
       tritonPresentUnlock(pD);
       if (Flags.Present)
-         tritonPresentFlushAndGate(pD, FALSE /* arm */, FALSE /* wait */, NULL);
+         tritonPresentFlushAndGate(pD, FALSE /* arm */, FALSE /* wait */, NULL, NULL);
       InterlockedDecrement(&pD->presentInFlight);
       return S_OK;
    }
@@ -1161,7 +1179,7 @@ tritonDxgiBltCommon(DXGI_DDI_HDEVICE hDevice,
                                             src, SrcSubresource, &box);
          if (SUCCEEDED(shr)) {
             if (Flags.Present)
-               tritonPresentFlushAndGate(pD, FALSE /* arm */, FALSE /* wait */, NULL);
+               tritonPresentFlushAndGate(pD, FALSE /* arm */, FALSE /* wait */, NULL, NULL);
             InterlockedDecrement(&pD->presentInFlight);
             return S_OK;
          }
@@ -1191,7 +1209,7 @@ tritonDxgiBltCommon(DXGI_DDI_HDEVICE hDevice,
    tritonPresentUnlock(pD);
    /* A presentation blt is the present: nothing later submits it. */
    if (Flags.Present)
-      tritonPresentFlushAndGate(pD, FALSE /* arm */, FALSE /* wait */, NULL);
+      tritonPresentFlushAndGate(pD, FALSE /* arm */, FALSE /* wait */, NULL, NULL);
    InterlockedDecrement(&pD->presentInFlight);
    return S_OK;
 }
@@ -1322,8 +1340,11 @@ tritonDxgiPresent1(DXGI_DDI_ARG_PRESENT1 *pArgs)
       tritonPresentUnlock(pD);
    }
    UINT64 flipGate = 0;
+   UINT64 frame[2] = {0, 0};
    tritonPresentFlushAndGate(pD, TRUE /* arm */, !src->IsPresentable /* wait */,
-                             src->IsPresentable ? &flipGate : NULL);
+                             src->IsPresentable ? &flipGate : NULL, frame);
+   if (src->IsPresentable)
+      InterlockedIncrement(&pD->traceFrame);
 
    DXGIDDICB_PRESENT cb;
    memset(&cb, 0, sizeof(cb));
@@ -1331,7 +1352,7 @@ tritonDxgiPresent1(DXGI_DDI_ARG_PRESENT1 *pArgs)
    cb.hDstAllocation = dst ? dst->hKMAllocation : 0;
    cb.pDXGIContext   = pArgs->pDXGIContext;
    cb.hContext       = pD->hKMContext;
-   HRESULT hr = tritonPresentSubmitCb(pD, &cb, flipGate);
+   HRESULT hr = tritonPresentSubmitCb(pD, &cb, flipGate, src->IsPresentable ? frame : NULL);
    tritonPresentAmortize(pD);
    InterlockedDecrement(&pD->presentInFlight);
    return hr;

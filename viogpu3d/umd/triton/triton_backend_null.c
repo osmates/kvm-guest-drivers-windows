@@ -36,6 +36,15 @@ void triton_backend_flip_wait(PTRITON_DEVICE pD, UINT64 value)
     (void)value;
 }
 
+void triton_backend_flip_trace(PTRITON_DEVICE pD, DXGIDDICB_PRESENT *cb, UINT64 frame, UINT64 frameDone, UINT64 gate)
+{
+    (void)pD;
+    (void)cb;
+    (void)frame;
+    (void)frameDone;
+    (void)gate;
+}
+
 UINT triton_backend_workaround_flags(void)
 {
     return 0;
@@ -191,6 +200,12 @@ void triton12_backend_destroy_queue(struct TRITON12_DEVICE *p, struct TRITON12_Q
 {
     (void)p;
     (void)q;
+}
+
+UINT triton12_backend_surface_id(struct TRITON12_RESOURCE *r)
+{
+    (void)r;
+    return 0;
 }
 
 BOOL triton12_backend_gate_queue(struct TRITON12_QUEUE *q)

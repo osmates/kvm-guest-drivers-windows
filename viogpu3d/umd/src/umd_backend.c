@@ -53,8 +53,8 @@ void triton_backend_log(const char *line)
     umd_log_line(line);
 }
 
-// VIOGPU3D_UMD_DEBUG=present_timing,d3d12_list_migration,no_d3d12_xqueue_order,no_flip_gate (any of them);
-// VIOGPU3D_UMD_PRESENT_GATE_TRACE=<ms>.
+// VIOGPU3D_UMD_DEBUG=present_timing,d3d12_list_migration,no_d3d12_xqueue_order,no_flip_gate,frame_trace (any of
+// them); VIOGPU3D_UMD_PRESENT_GATE_TRACE=<ms>.
 static INIT_ONCE umd_env_once = INIT_ONCE_STATIC_INIT;
 static UINT umd_debug_flags;
 static int umd_gate_trace_ms;
@@ -75,6 +75,7 @@ static BOOL CALLBACK umd_env_read(PINIT_ONCE once, PVOID param, PVOID *context)
         umd_debug_flags |= strstr(value, "present_timing") != NULL ? TRITON_DEBUG_PRESENT_TIMING : 0;
         umd_debug_flags |= strstr(value, "d3d12_list_migration") != NULL ? TRITON_DEBUG_D3D12_LIST_MIGRATION : 0;
         umd_debug_flags |= strstr(value, "no_d3d12_xqueue_order") != NULL ? TRITON_DEBUG_NO_D3D12_XQUEUE_ORDER : 0;
+        umd_debug_flags |= strstr(value, "frame_trace") != NULL ? TRITON_DEBUG_FRAME_TRACE : 0;
         umd_no_flip_gate = strstr(value, "no_flip_gate") != NULL;
     }
     length = GetEnvironmentVariableA("VIOGPU3D_UMD_PRESENT_GATE_TRACE", value, sizeof(value));
@@ -160,16 +161,31 @@ struct umd_flip_gate
     PFN_vkDestroySemaphore destroySemaphore;
     LONG flips;
     LONG running;
+    // frame_trace: a thread logs when the semaphore reaches each value, the frames' completions.
+    PFN_vkWaitSemaphores waitSemaphores;
+    PFN_vkGetSemaphoreCounterValue getSemaphoreCounterValue;
+    HANDLE traceThread;
+    volatile LONG traceStop;
 };
 
 struct umd11_device
 {
     struct umd_device base;
     struct umd_flip_gate gate;
+    // frame_trace: the private data of the flip being handed over, under kmCtxLock.
+    VIOGPU3D_FLIP_TRACE trace;
+    LONG traceSeq;
 };
 
 static void umd_flip_gate_fini(struct umd_flip_gate *gate)
 {
+    if (gate->traceThread != NULL)
+    {
+        InterlockedExchange(&gate->traceStop, 1);
+        WaitForSingleObject(gate->traceThread, 2000);
+        CloseHandle(gate->traceThread);
+        gate->traceThread = NULL;
+    }
     if (gate->semaphore != VK_NULL_HANDLE && gate->destroySemaphore != NULL)
     {
         gate->destroySemaphore(gate->device, gate->semaphore, NULL);
@@ -181,6 +197,59 @@ static void umd_flip_gate_fini(struct umd_flip_gate *gate)
         gate->interop->lpVtbl->Release(gate->interop);
         gate->interop = NULL;
     }
+}
+
+// Logs each value the gate's semaphore reaches, with the time, until the device goes.
+static DWORD WINAPI umd_flip_trace_thread(void *param)
+{
+    struct umd_flip_gate *gate = (struct umd_flip_gate *)param;
+    VkSemaphoreWaitInfo wait;
+    UINT64 done = 0;
+    UINT64 next;
+    UINT64 now;
+    LARGE_INTEGER t;
+
+    memset(&wait, 0, sizeof(wait));
+    wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+    wait.semaphoreCount = 1;
+    wait.pSemaphores = &gate->semaphore;
+    wait.pValues = &next;
+    while (!gate->traceStop)
+    {
+        next = done + 1;
+        if (*(volatile UINT64 *)&gate->value < next)
+        {
+            Sleep(1);
+            continue;
+        }
+        if (gate->waitSemaphores(gate->device, &wait, 50000000ull) != VK_SUCCESS)
+        {
+            continue;
+        }
+        QueryPerformanceCounter(&t);
+        now = next;
+        gate->getSemaphoreCounterValue(gate->device, gate->semaphore, &now);
+        umd_log("trace: gate done %llu qpc %lld", (unsigned long long)now, (long long)t.QuadPart);
+        done = now > next ? now : next;
+    }
+    return 0;
+}
+
+static void umd_flip_trace_start(struct umd_flip_gate *gate)
+{
+    PFN_vkVoidFunction counter = umd_vk_icd_device_proc(gate->device, "vkGetSemaphoreCounterValue");
+    LARGE_INTEGER frequency;
+
+    gate->waitSemaphores = (PFN_vkWaitSemaphores)umd_vk_icd_device_proc(gate->device, "vkWaitSemaphores");
+    gate->getSemaphoreCounterValue = (PFN_vkGetSemaphoreCounterValue)counter;
+    if (gate->waitSemaphores == NULL || gate->getSemaphoreCounterValue == NULL)
+    {
+        umd_log("trace: Venus has no vkWaitSemaphores; no gate completions");
+        return;
+    }
+    gate->traceThread = CreateThread(NULL, 0, umd_flip_trace_thread, gate, 0, NULL);
+    QueryPerformanceFrequency(&frequency);
+    umd_log("trace: qpc frequency %lld", (long long)frequency.QuadPart);
 }
 
 static BOOL umd_flip_gate_init(struct umd_flip_gate *gate, PTRITON_DEVICE pD)
@@ -252,6 +321,10 @@ static BOOL umd_flip_gate_init(struct umd_flip_gate *gate, PTRITON_DEVICE pD)
         return FALSE;
     }
     umd_log("flip gate: on, queue family %u", (unsigned)family);
+    if (triton_backend_debug(TRITON_DEBUG_FRAME_TRACE))
+    {
+        umd_flip_trace_start(gate);
+    }
     return TRUE;
 }
 
@@ -284,7 +357,8 @@ UINT64 triton_backend_flip_signal(PTRITON_DEVICE pD, BOOL frameDone)
                 : gate->sync != 0 ? "ordered"
                                   : "not ordered");
     }
-    if (umd_no_flip_gate)
+    // frame_trace signals the semaphore without the gate too, so that the trace has the frames' completions.
+    if (umd_no_flip_gate && !triton_backend_debug(TRITON_DEBUG_FRAME_TRACE))
     {
         return 0;
     }
@@ -317,7 +391,34 @@ UINT64 triton_backend_flip_signal(PTRITON_DEVICE pD, BOOL frameDone)
         return 0;
     }
     gate->value = value;
-    return value;
+    return umd_no_flip_gate ? 0 : value;
+}
+
+void triton_backend_flip_trace(PTRITON_DEVICE pD, DXGIDDICB_PRESENT *cb, UINT64 frame, UINT64 frameDone, UINT64 gate)
+{
+    struct umd11_device *dev = (struct umd11_device *)pD->pBackend;
+    LARGE_INTEGER t;
+
+    if (dev == NULL)
+    {
+        return;
+    }
+    QueryPerformanceCounter(&t);
+    memset(&dev->trace, 0, sizeof(dev->trace));
+    dev->trace.Magic = VIOGPU3D_FLIP_TRACE_MAGIC;
+    dev->trace.Seq = (UINT32)InterlockedIncrement(&dev->traceSeq);
+    dev->trace.Frame = frame;
+    dev->trace.FrameDone = frameDone;
+    dev->trace.Gate = gate != 0 ? gate : dev->gate.value;
+    dev->trace.PresentQpc = (UINT64)t.QuadPart;
+    cb->pPrivateDriverData = &dev->trace;
+    cb->PrivateDriverDataSize = sizeof(dev->trace);
+    umd_log("trace: flip %u frame %llu done %llu gate %llu qpc %lld",
+            (unsigned)dev->trace.Seq,
+            (unsigned long long)frame,
+            (unsigned long long)frameDone,
+            (unsigned long long)dev->trace.Gate,
+            (long long)t.QuadPart);
 }
 
 void triton_backend_flip_wait(PTRITON_DEVICE pD, UINT64 value)
@@ -761,6 +862,14 @@ HRESULT triton_backend_open_shared_texture(PTRITON_DEVICE pD,
         return FAILED(hr) ? hr : E_FAIL;
     }
 
+    if (triton_backend_debug(TRITON_DEBUG_FRAME_TRACE))
+    {
+        LARGE_INTEGER t;
+
+        QueryPerformanceCounter(&t);
+        r->TraceResId = ((const VIRTIO_WDDM_CREATE_ALLOCATION *)opened->pPrivateDriverData)->ResId;
+        umd_log("trace: open res %u %ux%u qpc %lld", r->TraceResId, desc.width, desc.height, (long long)t.QuadPart);
+    }
     if (desc.kind == VIOGPU3D_SURFACE_KERNEL_BLOB)
     {
         umd_log("OpenResource: the kernel driver's surface of type %u, %ux%u, rows of %u bytes",

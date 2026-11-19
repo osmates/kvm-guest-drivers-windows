@@ -388,6 +388,21 @@ t12ExecuteCommandLists(D3D12DDI_HCOMMANDQUEUE hQueue, UINT Count,
     TR_LOG_HOT("12.ExecuteCommandLists: %u list(s)", total);
     if (total)
         triton12QueueGate(q);
+    if (total && triton_backend_debug(TRITON_DEBUG_FRAME_TRACE)) {
+        LARGE_INTEGER t;
+        LONG present = 0;
+        QueryPerformanceCounter(&t);
+        for (UINT i = 0; i < Count; i++) {
+            PTRITON12_LIST l = (PTRITON12_LIST)pCommandLists[i].pDrvPrivate;
+            if (l && l->TracePresent) {
+                present = l->TracePresent;
+                l->TracePresent = 0;
+            }
+        }
+        TR_LOG("12.trace ecl %u present %ld drain %llu done %llu qpc %lld", total, (long)present,
+               (unsigned long long)t12Load64(&q->DrainVisible),
+               (unsigned long long)ID3D12Fence_GetCompletedValue(q->pDrainFence), (long long)t.QuadPart);
+    }
 }
 
 static void APIENTRY

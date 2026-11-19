@@ -56,6 +56,9 @@ HRESULT triton12_backend_create_shared_surface(struct TRITON12_DEVICE *p, struct
                                                const D3D12_RESOURCE_DESC *pDesc, UINT flags,
                                                ID3D12Resource **ppSurface, D3DKMT_HANDLE *phAllocation);
 
+// The host resource id of r's shared surface, which another process's open of it names; 0 without one.
+UINT triton12_backend_surface_id(struct TRITON12_RESOURCE *r);
+
 // After Triton released the surface. Clears r->hKMAllocation when it is the surface's.
 void triton12_backend_destroy_shared_surface(struct TRITON12_DEVICE *p, struct TRITON12_RESOURCE *r);
 

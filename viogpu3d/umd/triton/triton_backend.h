@@ -19,6 +19,8 @@ void triton_backend_log(const char *line);
 #define TRITON_DEBUG_PRESENT_TIMING        (1u << 0)
 #define TRITON_DEBUG_D3D12_LIST_MIGRATION  (1u << 1)
 #define TRITON_DEBUG_NO_D3D12_XQUEUE_ORDER (1u << 2)
+// QueryPerformanceCounter-stamped lines of each present, companion copy, DWM's opens and samples, and its flips.
+#define TRITON_DEBUG_FRAME_TRACE           (1u << 3)
 
 BOOL triton_backend_debug(UINT flag);
 int triton_backend_present_gate_trace_ms(void);
@@ -27,6 +29,9 @@ int triton_backend_present_gate_trace_ms(void);
 UINT64 triton_backend_flip_signal(PTRITON_DEVICE pD, BOOL frameDone);
 // Under kmCtxLock right before pfnPresentCb: the present's kernel context waits on the GPU for that value.
 void triton_backend_flip_wait(PTRITON_DEVICE pD, UINT64 value);
+// Under kmCtxLock before a scanout primary's pfnPresentCb, with frame_trace: the flip's private data for the kernel.
+void triton_backend_flip_trace(PTRITON_DEVICE pD, DXGIDDICB_PRESENT *cb, UINT64 frame, UINT64 frameDone,
+                               UINT64 gate);
 
 // Shader rewrites a host compiler needs.
 #define TRITON_WA_WIDEN_SCALAR_VS_INPUT_MASK       (1u << 0)

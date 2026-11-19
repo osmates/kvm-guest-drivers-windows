@@ -2437,6 +2437,21 @@ NTSTATUS VioGpuVidPN::SetVidPnSourceAddress(const DXGKARG_SETVIDPNSOURCEADDRESS 
                   pSetVidPnSourceAddress->PrimarySegment,
                   pSetVidPnSourceAddress->PrimaryAddress.QuadPart));
     }
+    const VIOGPU3D_FLIP_TRACE *pTrace = (const VIOGPU3D_FLIP_TRACE *)pSetVidPnSourceAddress->pDriverPrivateData;
+    if (pTrace != NULL && pSetVidPnSourceAddress->DriverPrivateDataSize >= sizeof(*pTrace) &&
+        pTrace->Magic == VIOGPU3D_FLIP_TRACE_MAGIC)
+    {
+        DbgPrint(TRACE_LEVEL_INFORMATION,
+                 ("flip trace: flip %u, frame %llu, done at present %llu, gate %llu, present qpc %llu, source address "
+                  "qpc %lld, allocation %p\n",
+                  pTrace->Seq,
+                  pTrace->Frame,
+                  pTrace->FrameDone,
+                  pTrace->Gate,
+                  pTrace->PresentQpc,
+                  KeQueryPerformanceCounter(NULL).QuadPart,
+                  pSetVidPnSourceAddress->hAllocation));
+    }
     m_sourceAddress = pSetVidPnSourceAddress->PrimaryAddress;
     m_sourceRes = reinterpret_cast<VioGpu3dAllocation *>(pSetVidPnSourceAddress->hAllocation);
     InterlockedOr(&m_shouldFlip, 1);

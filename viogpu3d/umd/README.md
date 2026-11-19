@@ -74,6 +74,13 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
   does. `VIOGPU3D_UMD_DEBUG=no_flip_gate` leaves it out; every 600 flips the log counts those handed to the kernel
   while their frame's fence had not yet read done. Composited surfaces (an app's windowed swapchain) already wait on
   the CPU for their frame before the present (Triton).
+- `VIOGPU3D_UMD_DEBUG=frame_trace` logs lines with the time (`QueryPerformanceCounter`) for each Direct3D 12 present
+  (its companion's host resource, the queue's drain values) and each `ExecuteCommandLists` (the present whose copy
+  it carries), and in a Direct3D 11 process (DWM) each open of another process's texture (its host resource), the
+  first bind of such a texture in each of the device's frames, each flip of a scanout primary (the frame's fence value
+  and its completed value, the flip gate's value) and, from a thread, each value the gate's semaphore reaches. A
+  flip's values also go to the kernel driver as the present's private data, which it logs with the time it sets the
+  source address. With `no_flip_gate` too, the semaphore is still signalled, for the trace, and nothing waits for it.
 - The driver's lines and DXVK's go to `OutputDebugString`. With `VIOGPU3D_UMD_LOG` naming a folder, each process also
   appends them to `<folder>\<exe>-<pid>.log`: LogonUI and DWM run in a session no debug-output collector reaches, and
   a machine-wide variable (`setx /M`, then a restart) reaches them.
@@ -341,6 +348,10 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
   (`12.Present ... dst=0x0`), not flips. With the system node in physical mode (a variant, not in this tree) and the
   gate: 827 shots of the colour windows, one of them a frame drawn in part, in tiles; triangles, Direct3D 11 none of
   131 torn, Direct3D 12 66 of 191.
+- Flips traced (2026-11-19, `frame_trace`): the flip gate holds DWM's flips: the kernel sets the source address about
+  7 ms after the present with it, 0.06 ms without, at the same frame rates. A Direct3D 11 window that changes its
+  whole colour every frame: 2 of 173 shots drawn in part without the gate (one in bands, one in tiles), none of the
+  187 judged with it.
 
 ## Unproven, and not done
 
@@ -362,7 +373,8 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
   `GetDC`, `AcquireSync`, `ReleaseSync` or `CreateSharedHandle`, it fails with `DXGI_ERROR_UNSUPPORTED`, `E_FAIL` or
   `E_NOTIMPL`, as `OpenSharedResource` and `OpenSharedResource1` already did.
 - No D3D9 DDI.
-- The flip gate: its GPU wait is not shown to delay a flip, and no torn flip was seen without it (above).
+- The flip gate: that a gated flip's frame is done when the kernel sets its source address (the trace shows the flip
+  held; the kernel driver logs the frame's completed value at the present only).
 - Direct3D 12: the torn frames of a triangle window (above), not explained: the queue gate holds each present until
   the copy into its companion is done, and a window that changes its colour every frame through the same path shows
   none; DWM composing Direct3D 12 back buffers through their companions; the cache folder rule;

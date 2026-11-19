@@ -55,6 +55,8 @@ struct umd_vk_pending
     HANDLE hRTDevice;
     HANDLE hRTResource;
     D3DKMT_HANDLE *pAllocation;
+    // The host resource id the kernel driver gave the allocation, when not NULL.
+    UINT32 *pResId;
     BOOL chained;
 };
 

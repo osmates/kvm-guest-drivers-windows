@@ -66,6 +66,7 @@ struct umd12_surface
     VkImage image;
     VkDeviceMemory memory;
     D3DKMT_HANDLE allocation;
+    UINT32 resId;
 };
 
 static struct umd12_device *umd12_device(PTRITON12_DEVICE p)
@@ -755,6 +756,7 @@ HRESULT triton12_backend_create_shared_surface(struct TRITON12_DEVICE *p,
     pending.hRTDevice = dev->base.hRTDevice;
     pending.hRTResource = r->hRTResource.handle;
     pending.pAllocation = &allocation;
+    pending.pResId = &surface->resId;
     umd_vk_pending_begin(&pending);
     result = dev->vk.allocateMemory(dev->vk.device, &allocateInfo, NULL, &surface->memory);
     umd_vk_pending_end(&pending);
@@ -809,6 +811,13 @@ HRESULT triton12_backend_create_shared_surface(struct TRITON12_DEVICE *p,
     r->pBackend = surface;
     *phAllocation = allocation;
     return S_OK;
+}
+
+UINT triton12_backend_surface_id(struct TRITON12_RESOURCE *r)
+{
+    const struct umd12_surface *surface = (const struct umd12_surface *)r->pBackend;
+
+    return surface != NULL ? surface->resId : 0;
 }
 
 void triton12_backend_destroy_shared_surface(struct TRITON12_DEVICE *p, struct TRITON12_RESOURCE *r)

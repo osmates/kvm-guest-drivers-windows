@@ -78,6 +78,14 @@ which name what Triton needs from the stack below it.
   names that token any more.
 - `triton.h`: `TRITON_ADAPTER` and `TRITON_DEVICE` carry `pBackend` in place of the kernel-mode state; it includes
   `triton_backend.h` and the standard headers `tritonKm.h` used to bring in.
+- The frame trace (`TRITON_DEBUG_FRAME_TRACE`): `triton.h` gives the device a count of its flips and a resource its
+  host resource id and last traced frame; `tritonView.c`'s shader resource setters log the first bind of an opened
+  texture in each frame; `tritonDxgi.c`'s `tritonPresentFlushAndGate` returns the frame's fence value and its
+  completed value, and `tritonPresentSubmitCb` has `triton_backend_flip_trace` fill the flip's private data, and
+  presents once more without it if `pfnPresentCb` refuses it. In the D3D12 layer `tritonPresent12.c` logs each
+  present with its companion's host resource (`triton12_backend_surface_id`), marks the list that carries its copy
+  (`TRITON12_LIST.TracePresent`, `triton12.h`), and `tritonQueue12.c` logs each `ExecuteCommandLists` with the drain
+  value and that mark.
 
 The D3D12 layer:
 

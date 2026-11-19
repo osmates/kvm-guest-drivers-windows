@@ -464,8 +464,15 @@ static HRESULT APIENTRY umd_allocate_cb(HANDLE hRTDevice, D3DDDICB_ALLOCATE *pDa
         pending->hRTResource != NULL && pData->hResource == pending->hRTResource && pData->NumAllocations == 1 &&
         pData->pAllocationInfo != NULL)
     {
-        // hAllocation leads both D3DDDI_ALLOCATIONINFO and D3DDDI_ALLOCATIONINFO2.
-        *pending->pAllocation = pData->pAllocationInfo[0].hAllocation;
+        // hAllocation leads both D3DDDI_ALLOCATIONINFO and D3DDDI_ALLOCATIONINFO2, pPrivateDriverData is third in both.
+        const D3DDDI_ALLOCATIONINFO *info = &pData->pAllocationInfo[0];
+
+        *pending->pAllocation = info->hAllocation;
+        if (pending->pResId != NULL && info->pPrivateDriverData != NULL &&
+            info->PrivateDriverDataSize >= sizeof(VIRTIO_WDDM_CREATE_ALLOCATION))
+        {
+            *pending->pResId = ((const VIRTIO_WDDM_CREATE_ALLOCATION *)info->pPrivateDriverData)->ResId;
+        }
     }
     return hr;
 }

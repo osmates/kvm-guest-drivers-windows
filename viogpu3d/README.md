@@ -126,6 +126,10 @@ merge request 38731): the same tags and layouts.
   display waits for the next start.
 - A flip shows a 3D resource with `SET_SCANOUT` or a blob with `SET_SCANOUT_BLOB`, by the allocation: dxgkrnl gives
   these primaries segment 0 and address 0. No hardware cursor yet.
+- A flip whose present carries a `VIOGPU3D_FLIP_TRACE` as its private data (the user-mode driver's
+  `VIOGPU3D_UMD_DEBUG=frame_trace`, `shared/viogpu3d_uapi.h`) is logged when `DxgkDdiSetVidPnSourceAddress` sets it:
+  the flip's number, its frame's fence value and the gate value, the time of the present and the time now
+  (`KeQueryPerformanceCounter`).
 
 ## Not done yet
 

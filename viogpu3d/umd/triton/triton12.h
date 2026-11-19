@@ -327,6 +327,8 @@ typedef struct TRITON12_LIST
      * list). */
     UINT                         ApiType;
     BOOL                         AwaitingReset;
+    // frame_trace: the present whose companion copy this list carries, until the queue runs it.
+    LONG                         TracePresent;
 } TRITON12_LIST, *PTRITON12_LIST;
 
 /* Each object family installs its own slots into the tables the runtime

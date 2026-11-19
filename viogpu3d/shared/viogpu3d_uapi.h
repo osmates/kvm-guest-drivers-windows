@@ -113,6 +113,9 @@
 // Metal's linear row alignment on Apple GPUs, so that an importer's linear image has the kernel driver's pitch.
 #define VIOGPU3D_SURFACE_PITCH_ALIGNMENT            16u
 
+// OSMates' own: VIOGPU3D_FLIP_TRACE, the private data of a traced flip (VIOGPU3D_UMD_DEBUG=frame_trace).
+#define VIOGPU3D_FLIP_TRACE_MAGIC                   0x54463356u
+
 #pragma pack(push, 1)
 
 // DXGKQAITYPE_UMDRIVERPRIVATE.
@@ -301,6 +304,20 @@ typedef struct _VIOGPU3D_SURFACE
     UINT64 Cookie;
 } VIOGPU3D_SURFACE;
 
+// A flip of a scanout primary: which frame it shows and when the user-mode driver handed it over.
+typedef struct _VIOGPU3D_FLIP_TRACE
+{
+    UINT32 Magic;
+    UINT32 Seq;
+    // The device's frame fence value and its completed value when the flip was handed over.
+    UINT64 Frame;
+    UINT64 FrameDone;
+    // The value the flip gate's semaphore takes after the frame.
+    UINT64 Gate;
+    // QueryPerformanceCounter at the present.
+    UINT64 PresentQpc;
+} VIOGPU3D_FLIP_TRACE;
+
 #pragma pack(pop)
 
 C_ASSERT(sizeof(VIRTIO_WDDM_ADAPTER_INFO) == 26);
@@ -320,3 +337,4 @@ C_ASSERT(sizeof(VIRTIO_WDDM_COMMAND_HEADER) == 8);
 C_ASSERT(sizeof(VIRTIO_WDDM_SUBMIT_COMMAND) == 8);
 C_ASSERT(sizeof(VIOGPU3D_SURFACE) == 80);
 C_ASSERT(FIELD_OFFSET(VIOGPU3D_SURFACE, Cookie) == 72);
+C_ASSERT(sizeof(VIOGPU3D_FLIP_TRACE) == 40);

@@ -821,6 +821,25 @@ tritonCopyStructureCount(D3D10DDI_HDEVICE hDevice, D3D10DDI_HRESOURCE hDstBuffer
 
 /* ---------- Per-stage SRV bind ---------- */
 
+// frame_trace: the first bind of an opened texture in each of this device's frames, with the time.
+static void
+tritonTraceSamples(PTRITON_DEVICE pD, UINT N, const D3D10DDI_HSHADERRESOURCEVIEW *ph)
+{
+    if (!ph || !triton_backend_debug(TRITON_DEBUG_FRAME_TRACE))
+        return;
+    const LONG frame = pD->traceFrame;
+    for (UINT i = 0; i < N; ++i) {
+        PTRITON_SRVIEW v = (PTRITON_SRVIEW)(ph[i].pDrvPrivate);
+        PTRITON_RESOURCE r = v ? v->pResource : NULL;
+        if (!r || !r->TraceResId || r->TraceFrame == frame + 1)
+            continue;
+        r->TraceFrame = frame + 1;
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        TR_LOG("trace: sample res %u frame %ld qpc %lld", r->TraceResId, (long)frame, (long long)t.QuadPart);
+    }
+}
+
 #define TR_SRV_SETTER(stage, ctx_method)                                                 \
 void APIENTRY                                                                 \
 triton ## stage ## SetShaderResources(D3D10DDI_HDEVICE hDevice, UINT Start, UINT N,      \
@@ -837,6 +856,7 @@ triton ## stage ## SetShaderResources(D3D10DDI_HDEVICE hDevice, UINT Start, UINT
             : NULL;                                                                      \
         a[i] = v ? v->pSRV : NULL;                                                       \
     }                                                                                    \
+    tritonTraceSamples(pD, N, ph);                                                       \
     ID3D11DeviceContext1_##ctx_method(pD->pCtx1, Start, N, a);                           \
 }
 
