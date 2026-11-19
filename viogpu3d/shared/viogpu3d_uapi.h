@@ -46,6 +46,9 @@
 #define VIRTIO_WDDM_ALLOCATE_BLOB_TAG               4778121577295003990ull
 #define VIRTIO_WDDM_SUBMIT_COMMAND_VIRTUAL_TAG      6216178336949162838ull
 
+// The node of the Direct3D runtimes' contexts: node 0, the system's, is physical for CDD's blts.
+#define VIOGPU3D_NODE_RUNTIME                       1
+
 // The largest private data of one submission: its tag, command headers and their bodies.
 #define VIRTIO_WDDM_MAX_SUBMIT_COMMAND_VIRTUAL_SIZE 8192
 

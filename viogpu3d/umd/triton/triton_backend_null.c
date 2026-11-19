@@ -52,6 +52,11 @@ BOOL triton_backend_wait_present_context(PTRITON_DEVICE pD, DWORD timeoutMs)
     return FALSE;
 }
 
+UINT triton_backend_context_node(void)
+{
+    return 0;
+}
+
 UINT triton_backend_workaround_flags(void)
 {
     return 0;

@@ -36,6 +36,7 @@ tritonPresentEnsureKernelContext(PTRITON_DEVICE pD)
       if (pD->KTCallbacks.pfnCreateContextVirtualCb) {
          D3DDDICB_CREATECONTEXTVIRTUAL vctx;
          memset(&vctx, 0, sizeof(vctx));
+         vctx.NodeOrdinal = triton_backend_context_node();
          hr = pD->KTCallbacks.pfnCreateContextVirtualCb(pD->hRTDevice.handle,
                                                         &vctx);
          if (SUCCEEDED(hr)) {
@@ -46,6 +47,7 @@ tritonPresentEnsureKernelContext(PTRITON_DEVICE pD)
       if (!pD->hKMContext) {
          D3DDDICB_CREATECONTEXT ctx;
          memset(&ctx, 0, sizeof(ctx));
+         ctx.NodeOrdinal = triton_backend_context_node();
          HRESULT lhr = pD->KTCallbacks.pfnCreateContextCb(pD->hRTDevice.handle,
                                                           &ctx);
          if (SUCCEEDED(lhr)) {

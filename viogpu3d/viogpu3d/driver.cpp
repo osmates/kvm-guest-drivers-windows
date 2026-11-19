@@ -691,9 +691,8 @@ NTSTATUS APIENTRY VioGpu3dGetNodeMetadata(_In_ CONST HANDLE hAdapter,
             break;
     }
     RtlStringCchCopyW(pGetNodeMetadata->FriendlyName, ARRAYSIZE(pGetNodeMetadata->FriendlyName), name);
-    // dxgkrnl refuses every virtual context (STATUS_INVALID_PARAMETER) on a node without it, so Venus and the
-    // Direct3D runtimes get no context at all.
-    pGetNodeMetadata->GpuMmuSupported = TRUE;
+    // Node 0 runs physical: on a virtual context CDD's blts get no allocation list.
+    pGetNodeMetadata->GpuMmuSupported = NodeOrdinal != VIOGPU3D_NODE_SYSTEM;
     return STATUS_SUCCESS;
 }
 

@@ -73,7 +73,7 @@ t12CreateCommandQueueWithPriority(D3D12DDI_HDEVICE hDevice,
     if (p->pUMCallbacks && p->pUMCallbacks->pfnCreateContextVirtualCb) {
         D3DDDICB_CREATECONTEXTVIRTUAL ctx;
         memset(&ctx, 0, sizeof(ctx));
-        ctx.NodeOrdinal = 0;
+        ctx.NodeOrdinal = triton_backend_context_node();
         ctx.EngineAffinity = 1;
         HRESULT chr = p->pUMCallbacks->pfnCreateContextVirtualCb(
             pArgs->hRTCommandQueue, &ctx);

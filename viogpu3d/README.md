@@ -46,9 +46,11 @@ display-only driver in `viogpu` stays as it is.
   gets on the context and logs it, though no boot has called it yet (2026-11-19).
 - One segment: a 1 GiB aperture of system memory.
 - 64 nodes: 0 for the system, 1 for Venus, 2 for paging, 3 to 63 for Venus rings 0 to 60. Mesa's Venus ICD opens
-  one virtual context a ring on nodes 3 to 63. Every node reports `GpuMmuSupported`: without it dxgkrnl refuses every
-  virtual context with `STATUS_INVALID_PARAMETER` before the driver sees it, and takes the change only after a restart
-  of Windows, not of the device.
+  one virtual context a ring on nodes 3 to 63, and the Direct3D drivers open their present and queue contexts on node
+  1 (`VIOGPU3D_NODE_RUNTIME`, `shared/viogpu3d_uapi.h`). Every node but the system's reports `GpuMmuSupported`:
+  without it dxgkrnl refuses every virtual context with `STATUS_INVALID_PARAMETER` before the driver sees it, and takes
+  the change only after a restart of Windows, not of the device. The system node runs in physical mode, so CDD's
+  context there gets the documented allocation list in `DxgkDdiPresent` (below).
 - An allocation's driver object comes from `DxgkCbAcquireHandleData`, released with `DxgkCbReleaseHandleData` when
   the call is done. dxgkrnl answers `DxgkCbGetHandleData` with NULL to a WDDM 2.0 driver (DxgKrnl event 494, "WDDM2
   driver calls WDDM1.x DDI!"), which failed every `DxgkDdiOpenAllocation`, so the creation of every allocation.
@@ -88,24 +90,29 @@ merge request 38731): the same tags and layouts.
   linear plane of rows `width * 4` rounded up to 16 bytes, as Metal pads a linear texture's rows on Apple GPUs.
   Not CPU visible (`NonCpuVisiblePrimary`). Any process's Venus driver imports them, so the Direct3D driver opens them.
 - Shadow and staging surfaces, and CPU-visible GDI staging surfaces: guest memory the CPU draws in, with no host
-  resource. A process cannot open them as textures.
+  resource, accessed physically (`DXGK_ALLOCATIONINFOFLAGS_WDDM2_0.AccessedPhysically`). For CDD's boot blts on the
+  physical system node VidMm then maps the shadow surface into the aperture segment (`MAP_APERTURE_SEGMENT`, with its
+  MDL), and the allocation list names it there; without the flag it stayed in segment 0 at address 0, with no map and
+  so no CPU view. The work thread's CPU view comes from that map alone. The first 64 maps and unmaps of these surfaces
+  are logged. A process cannot open them as textures.
 - Other GDI surfaces are refused: the driver has no GDI hardware acceleration.
 - `DxgkDdiPresent` with blt or color fill, on the contexts of GDI and of kernel clients (CDD's, the system's): the
   work thread copies or fills the rows with the CPU when the DMA buffer runs, between those surfaces and blobs whose
   rows Venus described, then flushes the rectangle if the blob is on screen. No stretch, color keys, rotation or
-  overlapping blts in one surface. These contexts have virtual addressing, as every context here, and a 64 KiB DMA
-  buffer in the aperture segment: VidMm maps a virtual context's DMA buffer into the process's GPU virtual address
-  space, which takes an allocation in a segment. Without a DMA buffer CDD's device on this adapter failed in its first
-  context ("Couldn't allocate a contiguous buffer for the DMA buffer"), and one in contiguous memory
-  (`DmaBufferSegmentSet` 0) made dxgmms2 fault in `AddDmaBufferToPool` (bug check 0x3B). Their blts and fills arrive
-  in `DxgkDdiSubmitCommandVirtual`. The contexts of user-mode drivers get no DMA buffer, and their blts and fills are
-  refused.
+  overlapping blts in one surface. These contexts are on the system node, in physical mode, with a 64 KiB DMA buffer;
+  a context with virtual addressing there would have its DMA buffer in the aperture segment: VidMm maps a virtual
+  context's DMA buffer into the process's GPU virtual address space, which takes an allocation in a segment. Without a
+  DMA buffer CDD's device on this adapter failed in its first context ("Couldn't allocate a contiguous buffer for the
+  DMA buffer"), and one in contiguous memory (`DmaBufferSegmentSet` 0) on a virtual context made dxgmms2 fault in
+  `AddDmaBufferToPool` (bug check 0x3B). The contexts of user-mode drivers get no DMA buffer, and their blts and fills
+  are refused. The first 16 and every 256th present on a physical context log both surfaces' segment and address.
 - A present the driver cannot do fails with a status `DxgkDdiPresent` documents: `STATUS_INVALID_HANDLE` when the
   allocation list has no surface where the present needs one, `STATUS_ILLEGAL_INSTRUCTION` for one the device cannot
   run (color keys, rotation, stretch, a surface it cannot copy), and the first eight and every 256th log the context's
   flags and both surfaces. On a context with virtual addressing dxgkrnl 10.0.26100.9444 passes `DxgkDdiPresent` an
   array of `DXGK_PRESENTALLOCATIONINFO`, which Microsoft reserves for the system, where `pAllocationList` lives; read as
-  documented, the list names neither surface. So CDD's blts on this adapter fail that way (2026-11-19).
+  documented, the list names neither surface. So CDD's blts on this adapter failed that way while its system node had
+  virtual addressing (until 2026-11-19).
 
 ## Display
 
@@ -137,11 +144,16 @@ merge request 38731): the same tags and layouts.
   `2b0fd564`, which adds `kk: Allow linear 2D color attachments` and `kk: Emit fcanonicalize` to main's Mesa pin;
   Direct3D 12 graphics pipelines need the second (`umd/README.md`). Measured with a host app that has both, not with
   main's.
-- At boot CDD's first blts on this adapter (four, full screen, its shadow surface to the primary) fail with
-  `STATUS_INVALID_HANDLE`, and dxgkrnl logs "PresentFromCdd ... failed" for each (above). The desktop shows from DWM's
-  first flip on. With the system node in physical mode (Triton's contexts on node 1) dxgkrnl passes the documented
-  list and no present fails, but VidMm maps CDD's shadow surface into no aperture, so the work thread has no CPU view
-  of it and copies nothing (measured 2026-11-19, not in this tree).
+- CDD's boot blts (2026-11-19): with the system node in virtual mode its first four blts (full screen, its shadow
+  surface to the primary) failed with `STATUS_INVALID_HANDLE` and dxgkrnl logged "PresentFromCdd ... failed" for
+  each; with the node physical and the shadow surface in segment 0, none failed, but the copy had no CPU view. With
+  the node physical and CPU surfaces accessed physically, VidMm maps the shadow surface (2880 x 1800, 5063 pages) into
+  the aperture at its first page with one map, the boot's four blts name it in segment 1 at the aperture's base, no
+  "PresentFromCdd" failure is logged and the work thread copies it. VidMm unmaps it about four seconds later. Not
+  measured: CDD's blts after that unmap (a DWM restart, GDI reading the screen) and blts of staging surfaces, which
+  have a CPU view only if VidMm maps them again. A live install of a package with the node split over one without it,
+  and over another with it, gave `VIDEO_TDR_TIMEOUT_DETECTED` live dumps (0x117) while the device restarted; installs
+  on the 2D driver and the boots and apps after gave none.
 - dxgkrnl logs "The root page directory is not set" on the DMA packets of processes that map no GPU virtual address
   (Venus maps none), and refuses Venus's hardware queue context while the driver reports WDDM 2.0 ("the driver WDDM
   version is < 2.5"); Venus then opens a context per ring.

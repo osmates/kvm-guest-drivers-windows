@@ -81,6 +81,8 @@ which name what Triton needs from the stack below it.
 - `tritonDxgi.c`, the buffer wait: `tritonDxgiPresent` and `tritonDxgiPresent1` call
   `triton_backend_wait_present_context` before they flush a composited surface's frame (not a scanout primary's);
   `TRITON_DEBUG_NO_BUFFER_WAIT` leaves it out, and with the frame trace each wait is logged.
+- `tritonPresent.c` and `tritonQueue12.c`: the present's kernel context and each Direct3D 12 queue's are made on the
+  node `triton_backend_context_node` names, where both were made on node 0.
 - The frame trace (`TRITON_DEBUG_FRAME_TRACE`): `triton.h` gives the device a count of its flips and a resource its
   host resource id and last traced frame; `tritonView.c`'s shader resource setters log the first bind of an opened
   texture in each frame; `tritonDxgi.c`'s `tritonPresentFlushAndGate` returns the frame's fence value and its

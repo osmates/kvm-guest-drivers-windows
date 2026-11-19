@@ -40,6 +40,9 @@ void triton_backend_flip_trace(PTRITON_DEVICE pD, DXGIDDICB_PRESENT *cb, UINT64 
 // Waits on the CPU, at most timeoutMs, until the present's kernel context has run every packet given to it.
 BOOL triton_backend_wait_present_context(PTRITON_DEVICE pD, DWORD timeoutMs);
 
+// The node of the kernel contexts Triton makes: the present's and each Direct3D 12 queue's.
+UINT triton_backend_context_node(void);
+
 // Shader rewrites a host compiler needs.
 #define TRITON_WA_WIDEN_SCALAR_VS_INPUT_MASK       (1u << 0)
 #define TRITON_WA_TYPE_VS_INPUT_FROM_VERTEX_FORMAT (1u << 1)

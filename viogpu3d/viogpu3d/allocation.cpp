@@ -357,6 +357,8 @@ NTSTATUS VioGpu3dAllocation::InitKernelSurface(_Inout_ DXGK_ALLOCATIONINFO *pInf
     {
         m_Kind = VIOGPU3D_ALLOCATION_CPU;
         pInfo->FlagsWddm2.CpuVisible = 1;
+        // CDD's blts run on the physical system node: VidMm then maps the surface into the aperture with its MDL.
+        pInfo->FlagsWddm2.AccessedPhysically = 1;
         pInfo->Size = (SIZE_T)AlignUp(bytes, PAGE_SIZE);
         return STATUS_SUCCESS;
     }
@@ -1166,6 +1168,26 @@ NTSTATUS VioGpu3dAdapter::BuildPagingBuffer(_Inout_ DXGKARG_BUILDPAGINGBUFFER *p
                 {
                     return STATUS_SUCCESS;
                 }
+                if (pAllocation->GetKind() == VIOGPU3D_ALLOCATION_CPU)
+                {
+                    static LONG maps;
+                    PMDL pMdl = pBuildPagingBuffer->MapApertureSegment.pMdl;
+                    if (InterlockedIncrement(&maps) <= 64)
+                    {
+                        DbgPrint(TRACE_LEVEL_INFORMATION,
+                                 ("aperture map: CPU surface of type %u, %ux%u, pitch %u: segment %u, page %llu, %llu "
+                                  "pages, MDL page %llu of an MDL of %lu bytes\n",
+                                  pAllocation->GetStandardType(),
+                                  pAllocation->GetWidth(),
+                                  pAllocation->GetHeight(),
+                                  pAllocation->GetPitch(),
+                                  pBuildPagingBuffer->MapApertureSegment.SegmentId,
+                                  (ULONGLONG)pBuildPagingBuffer->MapApertureSegment.OffsetInPages,
+                                  (ULONGLONG)pBuildPagingBuffer->MapApertureSegment.NumberOfPages,
+                                  (ULONGLONG)pBuildPagingBuffer->MapApertureSegment.MdlOffset,
+                                  pMdl != NULL ? MmGetMdlByteCount(pMdl) : 0));
+                    }
+                }
                 return pAllocation->AttachBacking(pBuildPagingBuffer->MapApertureSegment.pMdl,
                                                   pBuildPagingBuffer->MapApertureSegment.MdlOffset,
                                                   pBuildPagingBuffer->MapApertureSegment.NumberOfPages);
@@ -1173,6 +1195,21 @@ NTSTATUS VioGpu3dAdapter::BuildPagingBuffer(_Inout_ DXGKARG_BUILDPAGINGBUFFER *p
         case DXGK_OPERATION_UNMAP_APERTURE_SEGMENT:
             {
                 VioGpu3dAllocation *pAllocation = reinterpret_cast<VioGpu3dAllocation *>(pBuildPagingBuffer->UnmapApertureSegment.hAllocation);
+                if (pAllocation != NULL && pAllocation->GetKind() == VIOGPU3D_ALLOCATION_CPU)
+                {
+                    static LONG unmaps;
+                    if (InterlockedIncrement(&unmaps) <= 64)
+                    {
+                        DbgPrint(TRACE_LEVEL_INFORMATION,
+                                 ("aperture unmap: CPU surface of type %u, %ux%u: segment %u, page %llu, %llu pages\n",
+                                  pAllocation->GetStandardType(),
+                                  pAllocation->GetWidth(),
+                                  pAllocation->GetHeight(),
+                                  pBuildPagingBuffer->UnmapApertureSegment.SegmentId,
+                                  (ULONGLONG)pBuildPagingBuffer->UnmapApertureSegment.OffsetInPages,
+                                  (ULONGLONG)pBuildPagingBuffer->UnmapApertureSegment.NumberOfPages));
+                    }
+                }
                 if (pAllocation != NULL)
                 {
                     pAllocation->DetachBacking();

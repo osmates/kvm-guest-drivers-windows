@@ -453,6 +453,12 @@ void triton_backend_flip_wait(PTRITON_DEVICE pD, UINT64 value)
     }
 }
 
+// The system node runs in physical mode for CDD, and takes no virtual context.
+UINT triton_backend_context_node(void)
+{
+    return VIOGPU3D_NODE_RUNTIME;
+}
+
 BOOL triton_backend_wait_present_context(PTRITON_DEVICE pD, DWORD timeoutMs)
 {
     struct umd11_device *dev = (struct umd11_device *)pD->pBackend;

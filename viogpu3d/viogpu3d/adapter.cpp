@@ -1144,6 +1144,24 @@ NTSTATUS VioGpu3dAdapter::Present(_In_ VioGpu3dContext *pContext, _Inout_ DXGKAR
     VioGpu3dAllocation *pDst = reinterpret_cast<VioGpu3dAllocation *>(pPresent->pAllocationList[DXGK_PRESENT_DESTINATION_INDEX].hDeviceSpecificAllocation);
     VioGpu3dAllocation *pSrc = flags.Blt ? reinterpret_cast<VioGpu3dAllocation *>(pPresent->pAllocationList[DXGK_PRESENT_SOURCE_INDEX].hDeviceSpecificAllocation)
                                          : NULL;
+    if (!pContext->GetFlags().VirtualAddressing)
+    {
+        static LONG physical;
+        LONG n = InterlockedIncrement(&physical);
+        if (n <= 16 || n % 256 == 0)
+        {
+            const DXGK_ALLOCATIONLIST *pList = pPresent->pAllocationList;
+            DbgPrint(TRACE_LEVEL_INFORMATION,
+                     ("present #%ld on a physical context: flags 0x%x, source segment %u address 0x%llx, destination "
+                      "segment %u address 0x%llx\n",
+                      n,
+                      flags.Value,
+                      pList[DXGK_PRESENT_SOURCE_INDEX].SegmentId,
+                      (ULONGLONG)pList[DXGK_PRESENT_SOURCE_INDEX].PhysicalAddress.QuadPart,
+                      pList[DXGK_PRESENT_DESTINATION_INDEX].SegmentId,
+                      (ULONGLONG)pList[DXGK_PRESENT_DESTINATION_INDEX].PhysicalAddress.QuadPart));
+        }
+    }
     if (pDst == NULL || !pDst->IsPresentable() || (flags.Blt && (pSrc == NULL || !pSrc->IsPresentable())))
     {
         static LONG refused;

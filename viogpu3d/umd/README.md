@@ -153,7 +153,8 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
   for a fence the app signals from the CPU only after its present would hold each such present for that second. The
   companion wait and the buffer wait share one helper (`umd_context_mark_*`, `src/umd_vk.c`); every 600 waits the log
   has a `companion wait count:` or `buffer wait count:` line with their average and longest time and how many ran out
-  their second.
+  their second. Both Direct3D runtimes open their contexts on node 1 (`VIOGPU3D_NODE_RUNTIME`): the system node is
+  physical (`../README.md`).
 - Heaps and committed resources with no shared surface get a kernel allocation that names no memory
   (`VIOGPU3D_ALLOCATE_EMPTY_TAG` of `shared/viogpu3d_uapi.h`), because the runtime answers `SetResidencyPriority`
   itself and refuses an object without an allocation.
