@@ -140,6 +140,13 @@ merge request 38731): the same tags and layouts.
   display waits for the next start.
 - A flip shows a 3D resource with `SET_SCANOUT` or a blob with `SET_SCANOUT_BLOB`, by the allocation: dxgkrnl gives
   these primaries segment 0 and address 0. No hardware cursor yet.
+- The flip thread queues a flip's `SET_SCANOUT_BLOB` and `RESOURCE_FLUSH` at the vsync tick and reports the vsync at
+  once, and dxgkrnl then hands the primary shown before back to DWM. The host copies a shown blob with the CPU when it
+  runs these commands, so when it runs late it can still be copying a primary DWM draws its next frame into.
+  Screenshots that show a window with screen-aligned tiles of another frame (2026-11-19) fit that reading; the overlap
+  itself was not measured. Reporting the vsync only once the host answered the flush (a test package, not in this
+  tree) made both restarts of Windows that followed fail on the host, with a write to the host-visible region it does
+  not handle.
 - A flip whose present carries a `VIOGPU3D_FLIP_TRACE` as its private data (the user-mode driver's
   `VIOGPU3D_UMD_DEBUG=frame_trace`, `shared/viogpu3d_uapi.h`) is logged when `DxgkDdiSetVidPnSourceAddress` sets it:
   the flip's number, its frame's fence value and the gate value, the time of the present and the time now

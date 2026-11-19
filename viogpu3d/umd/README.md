@@ -411,9 +411,15 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
 - No D3D9 DDI.
 - The flip gate: that a gated flip's frame is done when the kernel sets its source address (the trace shows the flip
   held; the kernel driver logs the frame's completed value at the present only).
-- Direct3D 11 windows: about one shot in 200 to 500 shows tiles of another frame in the window, with the buffer wait or
-  without it, and no Direct3D 12 window has (above); which surface holds the partial frame is not known. That the
-  buffer wait changes what any shot shows is unproven. Direct3D 12: the runtime
+- Direct3D 11 windows: about one shot in 50 to 500 shows tiles of another frame in the window, with the buffer wait or
+  without it, and no Direct3D 12 window has (above). The tiles' edges follow the screen's 64-pixel grid, not the
+  window's (a few split a screen tile at half its height), each mixes a frame with the one two presents later, and the
+  same mixed image stayed on the Mac's screen across consecutive screenshots (2026-11-19). That fits the host copying
+  DWM's primary while DWM drew its next frame into it (`../README.md`, "Display"); the overlap itself was not measured.
+  DWM's flips waiting on the CPU for their frame, or a composited present also waiting on the GPU for it, made them
+  rarer (0.2 to 0.9 percent of shots of a window that changes colour every frame, against 1.8) without removing them;
+  neither is in this tree. That the buffer wait changes what any shot shows is unproven.
+  Direct3D 12: the runtime
   hands DWM a buffer before the driver's Present for it, so DWM may compose a companion's earlier frame; the companion
   wait's cost beyond the triangle; DWM composing Direct3D 12 back buffers through their companions; the cache folder
   rule;
