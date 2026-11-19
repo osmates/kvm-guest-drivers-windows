@@ -123,6 +123,8 @@ The D3D12 layer:
   gate cannot hold; companions made on demand share one helper, `t12EnsureCompanion`; the log goes through
   `TR_LOG`. `ID3D12Resource_GetDesc` goes through `lpVtbl`: mingw-w64's `d3d12.h` has the C macro only with
   `WIDL_C_INLINE_WRAPPERS`.
+- `tritonPresent12.c`, the companion wait: before a present copies into a companion it calls
+  `triton12_backend_wait_kernel_context`; `TRITON_DEBUG_NO_COMPANION_WAIT` leaves it out.
 - `tritonResource12.c`: no shared heap flags reach the inner device; a primary is made by
   `triton12CreateSharedResource`; the companion's create moved to `tritonPresent12.c`; a resource's shared surface is
   freed with `triton12_backend_destroy_shared_surface` before its placeholder allocation. With

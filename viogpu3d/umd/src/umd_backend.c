@@ -53,8 +53,8 @@ void triton_backend_log(const char *line)
     umd_log_line(line);
 }
 
-// VIOGPU3D_UMD_DEBUG=present_timing,d3d12_list_migration,no_d3d12_xqueue_order,no_flip_gate,frame_trace (any of
-// them); VIOGPU3D_UMD_PRESENT_GATE_TRACE=<ms>.
+// VIOGPU3D_UMD_DEBUG=present_timing,d3d12_list_migration,no_d3d12_xqueue_order,no_flip_gate,frame_trace,
+// no_companion_wait (any of them); VIOGPU3D_UMD_PRESENT_GATE_TRACE=<ms>.
 static INIT_ONCE umd_env_once = INIT_ONCE_STATIC_INIT;
 static UINT umd_debug_flags;
 static int umd_gate_trace_ms;
@@ -76,6 +76,7 @@ static BOOL CALLBACK umd_env_read(PINIT_ONCE once, PVOID param, PVOID *context)
         umd_debug_flags |= strstr(value, "d3d12_list_migration") != NULL ? TRITON_DEBUG_D3D12_LIST_MIGRATION : 0;
         umd_debug_flags |= strstr(value, "no_d3d12_xqueue_order") != NULL ? TRITON_DEBUG_NO_D3D12_XQUEUE_ORDER : 0;
         umd_debug_flags |= strstr(value, "frame_trace") != NULL ? TRITON_DEBUG_FRAME_TRACE : 0;
+        umd_debug_flags |= strstr(value, "no_companion_wait") != NULL ? TRITON_DEBUG_NO_COMPANION_WAIT : 0;
         umd_no_flip_gate = strstr(value, "no_flip_gate") != NULL;
     }
     length = GetEnvironmentVariableA("VIOGPU3D_UMD_PRESENT_GATE_TRACE", value, sizeof(value));

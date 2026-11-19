@@ -21,6 +21,8 @@ void triton_backend_log(const char *line);
 #define TRITON_DEBUG_NO_D3D12_XQUEUE_ORDER (1u << 2)
 // QueryPerformanceCounter-stamped lines of each present, companion copy, DWM's opens and samples, and its flips.
 #define TRITON_DEBUG_FRAME_TRACE           (1u << 3)
+// A Direct3D 12 present copies into its companion without waiting for the queue's kernel context first.
+#define TRITON_DEBUG_NO_COMPANION_WAIT     (1u << 4)
 
 BOOL triton_backend_debug(UINT flag);
 int triton_backend_present_gate_trace_ms(void);

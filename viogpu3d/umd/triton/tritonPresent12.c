@@ -424,9 +424,9 @@ t12Qpc(void)
     return t.QuadPart;
 }
 
-// frame_trace: the present, its companion's host resource and the queue's drain values.
+// The runtime's wait for DWM to give a buffer back holds the kernel context only, never the copy on the inner queue.
 static void
-t12TracePresent(PTRITON12_QUEUE q, LONG n, PTRITON12_RESOURCE src)
+t12WaitCompanionFree(PTRITON12_QUEUE q, LONG n, PTRITON12_RESOURCE src)
 {
     const BOOL trace = triton_backend_debug(TRITON_DEBUG_FRAME_TRACE);
     if (trace && n == 1) {
@@ -439,6 +439,18 @@ t12TracePresent(PTRITON12_QUEUE q, LONG n, PTRITON12_RESOURCE src)
                triton12_backend_surface_id(src), src->hKMAllocation,
                (unsigned long long)ID3D12Fence_GetCompletedValue(q->pDrainFence),
                (unsigned long long)t12Load64(&q->DrainVisible), (long long)t12Qpc());
+    if (triton_backend_debug(TRITON_DEBUG_NO_COMPANION_WAIT))
+        return;
+    const LONG64 t0 = trace ? t12Qpc() : 0;
+    const BOOL waited = triton12_backend_wait_kernel_context(q, 1000);
+    if (trace)
+        TR_LOG("12.trace waited %ld %s qpc %lld to %lld", (long)n, waited ? "done" : "NOT DONE", (long long)t0,
+               (long long)t12Qpc());
+    else if (!waited) {
+        static LONG s_late;
+        if (InterlockedIncrement(&s_late) <= 8)
+            TR_LOG("12.Present #%ld: no wait for the kernel context (failed, or over 1 s); copying anyway", (long)n);
+    }
 }
 
 static VOID APIENTRY
@@ -491,7 +503,7 @@ t12Present(D3D12DDI_HCOMMANDLIST hList, D3D12DDI_HCOMMANDQUEUE hQueue,
     const BOOL blt = pArgs->Flags.Blt ? TRUE : FALSE;
     if (src && src->pCompanion && src->pResource) {
         if (q->pDrainFence)
-            t12TracePresent(q, n, src);
+            t12WaitCompanionFree(q, n, src);
         if (blt && l && l->pList && !l->AwaitingReset) {
             t12RecordCompanionFill(l->pList, src);
             pOut->AddedGpuWork = TRUE;

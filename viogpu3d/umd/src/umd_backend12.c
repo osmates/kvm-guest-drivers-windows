@@ -59,6 +59,12 @@ struct umd12_queue
     VkSemaphore semaphore;
     D3DKMT_HANDLE sync;
     UINT64 value;
+    // A monitored fence the queue's kernel context signals and the CPU waits for, made at the first wait.
+    D3DKMT_HANDLE mark;
+    const volatile UINT64 *markCpu;
+    UINT64 markValue;
+    HANDLE markEvent;
+    BOOL markFailed;
 };
 
 struct umd12_surface
@@ -475,8 +481,143 @@ void triton12_backend_destroy_queue(struct TRITON12_DEVICE *p, struct TRITON12_Q
     {
         dev->vk.destroySemaphore(dev->vk.device, gate->semaphore, NULL);
     }
+    if (dev != NULL && gate->mark != 0 && dev->base.ktCallbacks.pfnDestroySynchronizationObjectCb != NULL)
+    {
+        D3DDDICB_DESTROYSYNCHRONIZATIONOBJECT destroy;
+
+        destroy.hSyncObject = gate->mark;
+        dev->base.ktCallbacks.pfnDestroySynchronizationObjectCb(dev->base.hRTDevice, &destroy);
+    }
+    if (gate->markEvent != NULL)
+    {
+        CloseHandle(gate->markEvent);
+    }
     HeapFree(GetProcessHeap(), 0, gate);
     q->pBackend = NULL;
+}
+
+// A 32-bit process reads the 64-bit value in two halves: the same value twice is one value.
+static UINT64 umd12_mark_read(const struct umd12_queue *gate)
+{
+    UINT64 a = *gate->markCpu;
+    UINT64 b = *gate->markCpu;
+
+    while (a != b)
+    {
+        a = b;
+        b = *gate->markCpu;
+    }
+    return a;
+}
+
+static BOOL umd12_mark_init(struct umd12_device *dev, struct umd12_queue *gate)
+{
+    const D3DDDI_DEVICECALLBACKS *kt = &dev->base.ktCallbacks;
+    D3DDDICB_CREATESYNCHRONIZATIONOBJECT2 create;
+    HRESULT hr;
+
+    gate->markFailed = TRUE;
+    if (kt->pfnCreateSynchronizationObject2Cb == NULL || kt->pfnWaitForSynchronizationObjectFromCpuCb == NULL ||
+        (kt->pfnSignalSynchronizationObjectFromGpuCb == NULL && kt->pfnSignalSynchronizationObjectFromGpu2Cb == NULL))
+    {
+        umd_log("companion wait: the runtime gives no monitored fence callbacks");
+        return FALSE;
+    }
+    memset(&create, 0, sizeof(create));
+    create.Info.Type = D3DDDI_MONITORED_FENCE;
+    create.Info.MonitoredFence.InitialFenceValue = 0;
+    hr = kt->pfnCreateSynchronizationObject2Cb(dev->base.hRTDevice, &create);
+    if (FAILED(hr) || create.hSyncObject == 0 || create.Info.MonitoredFence.FenceValueCPUVirtualAddress == NULL)
+    {
+        umd_log("companion wait: no monitored fence: 0x%08lx", (unsigned long)hr);
+        return FALSE;
+    }
+    gate->mark = create.hSyncObject;
+    gate->markCpu = (const volatile UINT64 *)create.Info.MonitoredFence.FenceValueCPUVirtualAddress;
+    gate->markEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (gate->markEvent == NULL)
+    {
+        umd_log("companion wait: no event");
+        return FALSE;
+    }
+    gate->markFailed = FALSE;
+    return TRUE;
+}
+
+BOOL triton12_backend_wait_kernel_context(struct TRITON12_QUEUE *q, DWORD timeoutMs)
+{
+    struct umd12_device *dev = q->pDev != NULL ? umd12_device(q->pDev) : NULL;
+    struct umd12_queue *gate = (struct umd12_queue *)q->pBackend;
+    const D3DDDI_DEVICECALLBACKS *kt;
+    D3DDDICB_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait;
+    ULONGLONG deadline;
+    UINT64 value;
+    HRESULT hr;
+
+    if (dev == NULL || gate == NULL || q->hKMContext == NULL || gate->markFailed ||
+        (gate->mark == 0 && !umd12_mark_init(dev, gate)))
+    {
+        return FALSE;
+    }
+    kt = &dev->base.ktCallbacks;
+    value = ++gate->markValue;
+    if (kt->pfnSignalSynchronizationObjectFromGpuCb != NULL)
+    {
+        D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMGPU signal;
+
+        memset(&signal, 0, sizeof(signal));
+        signal.hContext = q->hKMContext;
+        signal.ObjectCount = 1;
+        signal.ObjectHandleArray = &gate->mark;
+        signal.MonitoredFenceValueArray = &value;
+        hr = kt->pfnSignalSynchronizationObjectFromGpuCb(dev->base.hRTDevice, &signal);
+    }
+    else
+    {
+        D3DDDICB_SIGNALSYNCHRONIZATIONOBJECTFROMGPU2 signal;
+        HANDLE context = q->hKMContext;
+
+        memset(&signal, 0, sizeof(signal));
+        signal.ObjectCount = 1;
+        signal.ObjectHandleArray = &gate->mark;
+        signal.BroadcastContextCount = 1;
+        signal.BroadcastContextArray = &context;
+        signal.MonitoredFenceValueArray = &value;
+        hr = kt->pfnSignalSynchronizationObjectFromGpu2Cb(dev->base.hRTDevice, &signal);
+    }
+    if (FAILED(hr))
+    {
+        umd_log("companion wait: the kernel context's signal of %llu failed 0x%08lx",
+                (unsigned long long)value,
+                (unsigned long)hr);
+        return FALSE;
+    }
+    // A wake from an earlier registration that timed out is told apart by the fence's value.
+    deadline = GetTickCount64() + timeoutMs;
+    while (umd12_mark_read(gate) < value)
+    {
+        ULONGLONG now = GetTickCount64();
+
+        if (now >= deadline)
+        {
+            return FALSE;
+        }
+        memset(&wait, 0, sizeof(wait));
+        wait.ObjectCount = 1;
+        wait.ObjectHandleArray = &gate->mark;
+        wait.FenceValueArray = &value;
+        wait.hAsyncEvent = gate->markEvent;
+        hr = kt->pfnWaitForSynchronizationObjectFromCpuCb(dev->base.hRTDevice, &wait);
+        if (FAILED(hr))
+        {
+            umd_log("companion wait: the CPU wait for %llu failed 0x%08lx",
+                    (unsigned long long)value,
+                    (unsigned long)hr);
+            return FALSE;
+        }
+        WaitForSingleObject(gate->markEvent, (DWORD)(deadline - now));
+    }
+    return TRUE;
 }
 
 BOOL triton12_backend_gate_queue(struct TRITON12_QUEUE *q)

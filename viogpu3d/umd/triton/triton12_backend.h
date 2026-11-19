@@ -47,6 +47,9 @@ void triton12_backend_destroy_queue(struct TRITON12_DEVICE *p, struct TRITON12_Q
 // fence signals and presents on that context come after the work. FALSE when nothing holds the context back.
 BOOL triton12_backend_gate_queue(struct TRITON12_QUEUE *q);
 
+// Waits on the CPU, at most timeoutMs, until q->hKMContext has run every packet given to it so far.
+BOOL triton12_backend_wait_kernel_context(struct TRITON12_QUEUE *q, DWORD timeoutMs);
+
 #define TRITON12_SHARED_SURFACE_PRIMARY (1u << 0)
 
 // A texture of pDesc whose memory is a kernel allocation of r's runtime resource, for presents and for the processes

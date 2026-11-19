@@ -137,6 +137,13 @@ loads vkd3d-proton from a DLL of its own beside it, for Direct3D 12 only: `viogp
   the driver's. A primary is such a surface itself. A back buffer stays vkd3d-proton's own, optimally tiled texture,
   with such a surface as its present companion, which the present copies the frame into: DWM opens the companion
   through the Direct3D 10 and 11 driver, as it opens a Direct3D 11 app's back buffer.
+- The companion wait: DXGI gives a back buffer back to the app once DWM is done with it, by a wait the runtime puts on
+  the queue's kernel context, and the copy into the companion runs on vkd3d-proton's queue, which no kernel wait
+  holds. So before a present records that copy the CPU waits, at most 1 s, until the kernel context has run every
+  packet given to it so far: the context signals a monitored fence of the runtime's
+  (`pfnSignalSynchronizationObjectFromGpuCb`) and the CPU waits for it (`pfnWaitForSynchronizationObjectFromCpuCb`
+  with an event, then the fence's CPU value). `VIOGPU3D_UMD_DEBUG=no_companion_wait` leaves it out. A queue that waits
+  for a fence the app signals from the CPU only after its present would hold each such present for that second.
 - Heaps and committed resources with no shared surface get a kernel allocation that names no memory
   (`VIOGPU3D_ALLOCATE_EMPTY_TAG` of `shared/viogpu3d_uapi.h`), because the runtime answers `SetResidencyPriority`
   itself and refuses an object without an allocation.
@@ -352,6 +359,16 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
   7 ms after the present with it, 0.06 ms without, at the same frame rates. A Direct3D 11 window that changes its
   whole colour every frame: 2 of 173 shots drawn in part without the gate (one in bands, one in tiles), none of the
   187 judged with it.
+- Frames traced (2026-11-19, screenshots about three times a second, every run with `frame_trace` on, which adds log
+  lines in the app and DWM and a thread in DWM that waits on the flip gate's semaphore): without the companion wait
+  the Direct3D 12 triangle tore in 34 to 59 percent of its shots (968 of 1930 in five runs), the Direct3D 11 one in 6
+  of 912. DWM binds a Direct3D 12 present's companion 0.13 to 0.33 ms (medians) before the runtime calls the driver's
+  Present for it, for 93 to 99 percent of the presents whose companion DWM bound within 5 ms of the Present, so before
+  the copy into it; with a test that has each companion whole and done before the API Present (not in this tree) the
+  triangle still tore in 104 of 270 shots, so the tear is the copy into a companion that a DWM frame still samples.
+  With the companion wait, on one boot, `frame_trace` on: none of 324 shots torn, against 115 of 338 without it; the
+  waits took 22 ms (median), DWM sampled a companion while its copy ran for 2 of 3508 presents (3789 of 3897
+  without), and the triangle presented 33.6 frames a second (36.5 without).
 
 ## Unproven, and not done
 
@@ -375,9 +392,12 @@ A Windows 11 guest on OSMates' accelerated GPU, the driver's lines collected fro
 - No D3D9 DDI.
 - The flip gate: that a gated flip's frame is done when the kernel sets its source address (the trace shows the flip
   held; the kernel driver logs the frame's completed value at the present only).
-- Direct3D 12: the torn frames of a triangle window (above), not explained: the queue gate holds each present until
-  the copy into its companion is done, and a window that changes its colour every frame through the same path shows
-  none; DWM composing Direct3D 12 back buffers through their companions; the cache folder rule;
+- The companion wait without `frame_trace`: every run above had it on.
+- Direct3D 11 windows: the triangle tore in 6 of 912 shots (above), frames in bands; the app's next frame and DWM's
+  sampling of a buffer run on Venus, which the runtime's waits between them do not hold. Direct3D 12: the runtime
+  hands DWM a buffer before the driver's Present for it, so DWM may compose a companion's earlier frame; the companion
+  wait's cost beyond the triangle; DWM composing Direct3D 12 back buffers through their companions; the cache folder
+  rule;
   that the fork's build without D3DKMT changes nothing an app sees through the runtime (no call of the runtime's reaches
   the parts it built out).
 - Direct3D 12 gaps known now: app waits on CPU-signalled fences are kernel packets the driver never sees (Triton has

@@ -202,6 +202,13 @@ void triton12_backend_destroy_queue(struct TRITON12_DEVICE *p, struct TRITON12_Q
     (void)q;
 }
 
+BOOL triton12_backend_wait_kernel_context(struct TRITON12_QUEUE *q, DWORD timeoutMs)
+{
+    (void)q;
+    (void)timeoutMs;
+    return FALSE;
+}
+
 UINT triton12_backend_surface_id(struct TRITON12_RESOURCE *r)
 {
     (void)r;
