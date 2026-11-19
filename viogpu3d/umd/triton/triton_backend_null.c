@@ -45,6 +45,13 @@ void triton_backend_flip_trace(PTRITON_DEVICE pD, DXGIDDICB_PRESENT *cb, UINT64 
     (void)gate;
 }
 
+BOOL triton_backend_wait_present_context(PTRITON_DEVICE pD, DWORD timeoutMs)
+{
+    (void)pD;
+    (void)timeoutMs;
+    return FALSE;
+}
+
 UINT triton_backend_workaround_flags(void)
 {
     return 0;

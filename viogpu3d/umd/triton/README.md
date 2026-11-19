@@ -78,6 +78,9 @@ which name what Triton needs from the stack below it.
   names that token any more.
 - `triton.h`: `TRITON_ADAPTER` and `TRITON_DEVICE` carry `pBackend` in place of the kernel-mode state; it includes
   `triton_backend.h` and the standard headers `tritonKm.h` used to bring in.
+- `tritonDxgi.c`, the buffer wait: `tritonDxgiPresent` and `tritonDxgiPresent1` call
+  `triton_backend_wait_present_context` before they flush a composited surface's frame (not a scanout primary's);
+  `TRITON_DEBUG_NO_BUFFER_WAIT` leaves it out, and with the frame trace each wait is logged.
 - The frame trace (`TRITON_DEBUG_FRAME_TRACE`): `triton.h` gives the device a count of its flips and a resource its
   host resource id and last traced frame; `tritonView.c`'s shader resource setters log the first bind of an opened
   texture in each frame; `tritonDxgi.c`'s `tritonPresentFlushAndGate` returns the frame's fence value and its

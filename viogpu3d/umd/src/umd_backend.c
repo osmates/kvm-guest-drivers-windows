@@ -54,7 +54,7 @@ void triton_backend_log(const char *line)
 }
 
 // VIOGPU3D_UMD_DEBUG=present_timing,d3d12_list_migration,no_d3d12_xqueue_order,no_flip_gate,frame_trace,
-// no_companion_wait (any of them); VIOGPU3D_UMD_PRESENT_GATE_TRACE=<ms>.
+// no_companion_wait,no_buffer_wait (any of them); VIOGPU3D_UMD_PRESENT_GATE_TRACE=<ms>.
 static INIT_ONCE umd_env_once = INIT_ONCE_STATIC_INIT;
 static UINT umd_debug_flags;
 static int umd_gate_trace_ms;
@@ -77,6 +77,7 @@ static BOOL CALLBACK umd_env_read(PINIT_ONCE once, PVOID param, PVOID *context)
         umd_debug_flags |= strstr(value, "no_d3d12_xqueue_order") != NULL ? TRITON_DEBUG_NO_D3D12_XQUEUE_ORDER : 0;
         umd_debug_flags |= strstr(value, "frame_trace") != NULL ? TRITON_DEBUG_FRAME_TRACE : 0;
         umd_debug_flags |= strstr(value, "no_companion_wait") != NULL ? TRITON_DEBUG_NO_COMPANION_WAIT : 0;
+        umd_debug_flags |= strstr(value, "no_buffer_wait") != NULL ? TRITON_DEBUG_NO_BUFFER_WAIT : 0;
         umd_no_flip_gate = strstr(value, "no_flip_gate") != NULL;
     }
     length = GetEnvironmentVariableA("VIOGPU3D_UMD_PRESENT_GATE_TRACE", value, sizeof(value));
@@ -176,6 +177,8 @@ struct umd11_device
     // frame_trace: the private data of the flip being handed over, under kmCtxLock.
     VIOGPU3D_FLIP_TRACE trace;
     LONG traceSeq;
+    // The buffer wait's: the present's kernel context signals it, the CPU waits for it.
+    struct umd_context_mark mark;
 };
 
 static void umd_flip_gate_fini(struct umd_flip_gate *gate)
@@ -450,6 +453,22 @@ void triton_backend_flip_wait(PTRITON_DEVICE pD, UINT64 value)
     }
 }
 
+BOOL triton_backend_wait_present_context(PTRITON_DEVICE pD, DWORD timeoutMs)
+{
+    struct umd11_device *dev = (struct umd11_device *)pD->pBackend;
+    UINT64 value;
+    BOOL signalled;
+
+    if (dev == NULL || pD->hKMContext == NULL || !pD->presentLockInit)
+    {
+        return FALSE;
+    }
+    EnterCriticalSection(&pD->kmCtxLock);
+    signalled = umd_context_mark_signal(&dev->base, &dev->mark, pD->hKMContext, &value);
+    LeaveCriticalSection(&pD->kmCtxLock);
+    return signalled && umd_context_mark_wait(&dev->base, &dev->mark, value, timeoutMs, "buffer wait");
+}
+
 // One per process: each Venus instance has its own contexts on the host.
 static struct umd_shared umd_caps_vk = {UMD_LOCK_INIT, NULL, 0};
 
@@ -647,6 +666,7 @@ void triton_backend_destroy_device(PTRITON_DEVICE pD)
         return;
     }
     umd_flip_gate_fini(&((struct umd11_device *)dev)->gate);
+    umd_context_mark_fini(dev, &((struct umd11_device *)dev)->mark);
     umd_vk_destroy(&dev->vk);
     umd_device_callbacks_fini(dev);
     HeapFree(GetProcessHeap(), 0, dev);

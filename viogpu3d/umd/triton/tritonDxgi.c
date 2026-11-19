@@ -562,6 +562,28 @@ tritonPresentSubmitCb(PTRITON_DEVICE pD, DXGIDDICB_PRESENT *cb, UINT64 flipGate,
    return hr;
 }
 
+/* The runtime's wait for the buffer holds the present's context, not DXVK's queue. */
+static void
+tritonPresentWaitBuffer(PTRITON_DEVICE pD)
+{
+   if (triton_backend_debug(TRITON_DEBUG_NO_BUFFER_WAIT))
+      return;
+   const BOOL trace = triton_backend_debug(TRITON_DEBUG_FRAME_TRACE);
+   LARGE_INTEGER t0, t1;
+   if (trace)
+      QueryPerformanceCounter(&t0);
+   const BOOL waited = triton_backend_wait_present_context(pD, 1000);
+   if (trace) {
+      QueryPerformanceCounter(&t1);
+      TR_LOG("trace: buffer waited %s qpc %lld to %lld", waited ? "done" : "NOT DONE",
+             (long long)t0.QuadPart, (long long)t1.QuadPart);
+   } else if (!waited) {
+      static LONG lateN;
+      if (InterlockedIncrement(&lateN) <= 8)
+         TR_LOG("present: no wait for the kernel context (failed, or over 1 s); flushing anyway");
+   }
+}
+
 /* The D3D11 runtime queues the Destroy* DDI of every object the app
  * releases until the driver calls pfnPerformAmortizedProcessingCb, as a
  * driver does when it submits a command buffer; Triton submits at
@@ -616,6 +638,8 @@ tritonDxgiPresent(DXGI_DDI_ARG_PRESENT *pArgs)
     * surfaces block until the GPU finishes (DWM's
     * sampling cannot be ordered any other way).  See
     * tritonPresentFlushAndGate. */
+   if (!src->IsPresentable)
+      tritonPresentWaitBuffer(pD);
    if (src->pPresentCompanion) {
       tritonPresentLock(pD);
       tritonResourceSyncPresentCompanion(pD, src);
@@ -1334,6 +1358,8 @@ tritonDxgiPresent1(DXGI_DDI_ARG_PRESENT1 *pArgs)
    /* See tritonDxgiPresent: the frame must be submitted or it never reaches
     * the shared dmabuf.  Arm always; a primary's flip goes through the flip
     * gate, and only composited (non-primary) surfaces wait. */
+   if (!src->IsPresentable)
+      tritonPresentWaitBuffer(pD);
    if (src->pPresentCompanion) {
       tritonPresentLock(pD);
       tritonResourceSyncPresentCompanion(pD, src);

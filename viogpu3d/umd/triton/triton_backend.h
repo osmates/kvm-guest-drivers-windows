@@ -23,6 +23,8 @@ void triton_backend_log(const char *line);
 #define TRITON_DEBUG_FRAME_TRACE           (1u << 3)
 // A Direct3D 12 present copies into its companion without waiting for the queue's kernel context first.
 #define TRITON_DEBUG_NO_COMPANION_WAIT     (1u << 4)
+// A Direct3D 11 frame for DWM goes to the GPU without waiting for the present's kernel context first.
+#define TRITON_DEBUG_NO_BUFFER_WAIT        (1u << 5)
 
 BOOL triton_backend_debug(UINT flag);
 int triton_backend_present_gate_trace_ms(void);
@@ -34,6 +36,9 @@ void triton_backend_flip_wait(PTRITON_DEVICE pD, UINT64 value);
 // Under kmCtxLock before a scanout primary's pfnPresentCb, with frame_trace: the flip's private data for the kernel.
 void triton_backend_flip_trace(PTRITON_DEVICE pD, DXGIDDICB_PRESENT *cb, UINT64 frame, UINT64 frameDone,
                                UINT64 gate);
+
+// Waits on the CPU, at most timeoutMs, until the present's kernel context has run every packet given to it.
+BOOL triton_backend_wait_present_context(PTRITON_DEVICE pD, DWORD timeoutMs);
 
 // Shader rewrites a host compiler needs.
 #define TRITON_WA_WIDEN_SCALAR_VS_INPUT_MASK       (1u << 0)
