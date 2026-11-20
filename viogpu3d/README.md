@@ -153,7 +153,10 @@ merge request 38731): the same tags and layouts.
   logging, showed them too (10 of 642 shots, against 6 of 573 with this tree in the next boot); of those 16 tile shots'
   19308 edge samples, 19032 lie on the screen's 64-pixel grid, 268 (all horizontal) on the window's and 8 on neither. In
   62 of 3000 copies of a shown blob the host copied while a fence the blob's Venus context had asked 3 to 65 ms before
-  was not signalled yet; whether that work wrote the copied blob is not known (2026-11-20).
+  was not signalled yet; whether that work wrote the copied blob is not known (2026-11-20). On OSMates main 75402121
+  with each such copy logged and this tree, none of the 16 tile shots in 875 shots of a Direct3D 11 window had one from
+  100 ms before its screenshot to its end, against 10 of the other 859 shots; so in that run the tiles did not come with
+  those copies (2026-11-21).
 - A flip whose present carries a `VIOGPU3D_FLIP_TRACE` as its private data (the user-mode driver's
   `VIOGPU3D_UMD_DEBUG=frame_trace`, `shared/viogpu3d_uapi.h`) is logged when `DxgkDdiSetVidPnSourceAddress` sets it:
   the flip's number, its frame's fence value and the gate value, the time of the present and the time now
@@ -188,12 +191,32 @@ merge request 38731): the same tags and layouts.
   compiled Metal shaders meanwhile, at a load average of 24 to 44, and the guest timed out during each, its oldest
   unsignalled EXEC_BUF fence one of those the stream held. 2 of that run's 8 timeouts had no such wait on the host.
   Making the 143 Venus contexts of that run took the render server 12 ms at most, and nothing held OSMates' renderer
-  thread for more than 184 ms (2026-11-20).
+  thread for more than 184 ms (2026-11-20). On OSMates main 75402121 with the render server logging each Venus command
+  of 20 ms or more, pipeline creation took most of the two longest of the three streams that ran when the guest timed
+  out, and nearly all of a creation was KosmicKrisp compiling Metal libraries from MSL source: in a boot of 2.5 minutes
+  with this tree, 62 `vkCreateGraphicsPipelines` of 20 ms or more took 16.4 s (938 ms at most), none with a
+  `VkPipelineCache`, and its fragment libraries 15.0 s against 69 ms of pipeline states; the guest timed out as a stream
+  of 2.4 s ended, 1.2 s of it in 4 pipeline creations. In another boot, at a load average of 4, a DWM restart's stream
+  of 230 commands took 6.1 s, 4.3 s of it in 18 pipeline creations; the guest timed out during it and again 10 s later,
+  during another context's stream of 2.0 s, 0.7 s of it in 2 pipeline creations. Each Venus context is a render server
+  process of its own. Metal's shader cache for that program is split into parts; a process takes one at its first
+  compile, keeps it until it ends and finds only what was compiled on it. So a new context on another part compiles the
+  same pipelines again: in one boot a fragment library of about 320 ms was compiled in 5 contexts, each on another part,
+  and a context's `vkCreateDevice` took up to 1.5 s compiling KosmicKrisp's own shaders on a part without them
+  (2026-11-20, 2026-11-21). Four more runs of the install-to-DWM-restart steps on OSMates main 3387ffce, in this order:
+  a package of `a4bd0b1e` timed out 5 times at a load average of 16 to 52 (the install, the restart and 3 after the DWM
+  restart), this tree 7 times at 4 to 6 (3 at the install, 4 after the DWM restart), then, with Metal's cache filled by
+  those runs, `a4bd0b1e` once at 5 to 12 (the install) and this tree twice at 3.5 to 5 (the install and after the DWM
+  restart). The install in place over .58701 timed out in all four, and the render server's "Metal Compiling Shader"
+  lines fell from 588 and 616 to 206 and 136 (2026-11-21).
 - Processes keep their views of host-visible blobs past the device's reset. With a test package whose flips wait for
   the host, processes wrote blobs the host had dropped in 3 of 5 restarts and stops of Windows (2026-11-20; none with
   this tree), the two writes placed from Venus's command encoders (`vn_CmdBindIndexBuffer2`, `vn_CmdBeginRendering`).
   OSMates main 3387ffce gives such a write a zeroed scratch page, and 2 of the 3 still stopped the machine at a second
-  write milliseconds later.
+  write milliseconds later. On OSMates main 75402121, which also gives one to an access after the host-visible region's
+  BAR stopped decoding, five restarts and stops of Windows with that test package went on without a stop: the first such
+  write of each of the two machine runs came from DWM (`dwmcore.dll`), and of the runs' 13 and 5 such faults, 2 and 1
+  came while the BAR did not decode (2026-11-21).
   Ending each view in its own process before `virtio_device_reset` (`KeStackAttachProcess`, then `DxgkCbUnmapMemory`
   or `MmUnmapLockedPages`) is the documented way; not built.
 - dxgkrnl logs "The root page directory is not set" on the DMA packets of processes that map no GPU virtual address
