@@ -149,7 +149,11 @@ merge request 38731): the same tags and layouts.
   of another frame (2026-11-19). A test package that reported the vsync only once the host answered the flush, so that
   DWM got no primary back while the host could still copy it, showed them too: 12 of 542 shots, against 6 of 1003 with
   this tree (2026-11-20). So they do not come from that overlap, and where they come from is open. The test package's
-  flips waited 6.6 to 12.2 ms on average for the answer.
+  flips waited 6.6 to 12.2 ms on average for the answer. A package of `a4bd0b1e`, from before the blt and timeout
+  logging, showed them too (10 of 642 shots, against 6 of 573 with this tree in the next boot); of those 16 tile shots'
+  19308 edge samples, 19032 lie on the screen's 64-pixel grid, 268 (all horizontal) on the window's and 8 on neither. In
+  62 of 3000 copies of a shown blob the host copied while a fence the blob's Venus context had asked 3 to 65 ms before
+  was not signalled yet; whether that work wrote the copied blob is not known (2026-11-20).
 - A flip whose present carries a `VIOGPU3D_FLIP_TRACE` as its private data (the user-mode driver's
   `VIOGPU3D_UMD_DEBUG=frame_trace`, `shared/viogpu3d_uapi.h`) is logged when `DxgkDdiSetVidPnSourceAddress` sets it:
   the flip's number, its frame's fence value and the gate value, the time of the present and the time now
@@ -176,8 +180,15 @@ merge request 38731): the same tags and layouts.
   package of this driver (DriverVer .58701, without the node split) restarted the device (the old driver also timed
   out as it stopped), 2.5 s after a Direct3D 11 app made its device right after another app ended, and 5 s after a
   DWM restart; another boot ran the same apps for 12 minutes without one. Each time the oldest buffer of one or two
-  nodes waited for one signal from the host, and DWM and the shell's processes ended after the reset. Why the host
-  signalled late is not known.
+  nodes waited for one signal from the host, and DWM and the shell's processes ended after the reset. On OSMates main
+  3387ffce, the same steps with a package of `a4bd0b1e`, with the Mac's load average at 4 to 9, gave no timeout; this
+  tree gave two, at the install and 10 s after the DWM restart, at 6 to 22 (2026-11-20). On OSMates main b78d1a5b with
+  host logging, every fence the host signalled 0.5 s or more after the guest asked (133) had waited in the render server
+  behind its own Venus context's command stream (`SUBMIT_CMD`); 6 of those streams, all DWM's, took 2.4 to 5.2 s and
+  compiled Metal shaders meanwhile, at a load average of 24 to 44, and the guest timed out during each, its oldest
+  unsignalled EXEC_BUF fence one of those the stream held. 2 of that run's 8 timeouts had no such wait on the host.
+  Making the 143 Venus contexts of that run took the render server 12 ms at most, and nothing held OSMates' renderer
+  thread for more than 184 ms (2026-11-20).
 - Processes keep their views of host-visible blobs past the device's reset. With a test package whose flips wait for
   the host, processes wrote blobs the host had dropped in 3 of 5 restarts and stops of Windows (2026-11-20; none with
   this tree), the two writes placed from Venus's command encoders (`vn_CmdBindIndexBuffer2`, `vn_CmdBeginRendering`).
