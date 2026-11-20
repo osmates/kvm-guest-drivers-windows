@@ -63,7 +63,10 @@ display-only driver in `viogpu` stays as it is.
   last submitted and completed fences, the oldest buffer's fence and how many host signals it still waits for) and the
   EXEC_BUF fences the host has not signalled into the dump's driver data (`viogpu3d debug info: ...`), and logs them;
   `DxgkDdiResetFromTimeout` and `DxgkDdiResetEngine` log the same. For any other bug check, where dxgkrnl may call it
-  at any IRQL, it leaves the driver data empty.
+  at any IRQL, it leaves the driver data empty. Windows puts that text in WER's kernel report, a minidump of about
+  290 KB (`ProgramData\Microsoft\Windows\WER\ReportQueue\Kernel_117_*\WATCHDOG-*.dmp`). Of four timeouts in one
+  guest, before and after a restart, only the first left a live dump in `LiveKernelReports`; for the others
+  `WerLiveKernelCreateReport` failed with `0xc0000022` (2026-11-20).
 
 ## Interface for user-mode drivers
 
@@ -163,11 +166,25 @@ merge request 38731): the same tags and layouts.
   each; with the node physical and the shadow surface in segment 0, none failed, but the copy had no CPU view. With
   the node physical and CPU surfaces accessed physically, VidMm maps the shadow surface (2880 x 1800, 5063 pages) into
   the aperture at its first page with one map, the boot's four blts name it in segment 1 at the aperture's base, no
-  "PresentFromCdd" failure is logged and the work thread copies it. VidMm unmaps it about four seconds later. Not
-  measured: CDD's blts after that unmap (a DWM restart, GDI reading the screen) and blts of staging surfaces, which
-  have a CPU view only if VidMm maps them again. A live install of a package with the node split over one without it,
-  and over another with it, gave `VIDEO_TDR_TIMEOUT_DETECTED` live dumps (0x117) while the device restarted; installs
-  on the 2D driver and the boots and apps after gave none.
+  "PresentFromCdd" failure is logged and the work thread copies it. VidMm unmaps it about four seconds later. After a
+  DWM restart and a sign-out and sign-in, VidMm mapped it again for each of CDD's next three blts and unmapped it about
+  a second after, and each had a CPU view (2026-11-20). Not measured: blts of staging surfaces, which have a CPU view
+  only if VidMm maps them again. A live install of a package with the node split over one without it, and over
+  another with it, gave `VIDEO_TDR_TIMEOUT_DETECTED` live dumps (0x117) while the device restarted; installs over the
+  2D driver gave none (2026-11-19, 2026-11-20).
+- GPU timeouts with apps (2026-11-20, OSMates main 3387ffce): this tree timed out 9 s after its install over an older
+  package of this driver (DriverVer .58701, without the node split) restarted the device (the old driver also timed
+  out as it stopped), 2.5 s after a Direct3D 11 app made its device right after another app ended, and 5 s after a
+  DWM restart; another boot ran the same apps for 12 minutes without one. Each time the oldest buffer of one or two
+  nodes waited for one signal from the host, and DWM and the shell's processes ended after the reset. Why the host
+  signalled late is not known.
+- Processes keep their views of host-visible blobs past the device's reset. With a test package whose flips wait for
+  the host, processes wrote blobs the host had dropped in 3 of 5 restarts and stops of Windows (2026-11-20; none with
+  this tree), the two writes placed from Venus's command encoders (`vn_CmdBindIndexBuffer2`, `vn_CmdBeginRendering`).
+  OSMates main 3387ffce gives such a write a zeroed scratch page, and 2 of the 3 still stopped the machine at a second
+  write milliseconds later.
+  Ending each view in its own process before `virtio_device_reset` (`KeStackAttachProcess`, then `DxgkCbUnmapMemory`
+  or `MmUnmapLockedPages`) is the documented way; not built.
 - dxgkrnl logs "The root page directory is not set" on the DMA packets of processes that map no GPU virtual address
   (Venus maps none), and refuses Venus's hardware queue context while the driver reports WDDM 2.0 ("the driver WDDM
   version is < 2.5"); Venus then opens a context per ring.
