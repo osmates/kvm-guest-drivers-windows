@@ -61,11 +61,14 @@ display-only driver in `viogpu` stays as it is.
   interlocked increment, as devices of several processes create allocations and contexts at once. An id the host
   refuses as in use (`VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID` for a resource, `INVALID_CONTEXT_ID` for a context) is
   not put back, and a create the host took but did not answer within 1 s is destroyed in queue order. Before, with a
-  plain increment and every refused id put back, one of two runs of a package of `a4bd0b1e` on OSMates main 3387ffce
-  (an install in place, a restart, then Direct3D apps) had 119 `RESOURCE_CREATE_BLOB` requests refused with
-  `INVALID_RESOURCE_ID`, from 16 s before a GPU timeout to the run's end. The 74 the driver's trace caught were all
-  for resource 50, which the host still had, and the Direct3D 11 and 12 apps after them failed. One run of the same
-  steps with this change had none; 15 Direct3D 12 apps, 3 at a time, had none with or without it (2026-11-21).
+  plain increment and every refused id put back, one of four runs of a package of `a4bd0b1e` (an install in place, a
+  restart, then Direct3D apps) had 119 `RESOURCE_CREATE_BLOB` requests refused with `INVALID_RESOURCE_ID`, from 16 s
+  before a GPU timeout to the run's end, on OSMates main 3387ffce. The 74 the driver's trace caught were all for
+  resource 50, which the host still had, and the Direct3D 11 and 12 apps after them failed. Its other three runs (one on
+  3387ffce; two on 75402121 with the render server logging each Venus command of 20 ms or more, one of them stopped
+  during its Direct3D 11 app) had none, and so did three runs of the same steps with this change (one on 3387ffce, two
+  on 75402121 with that logging) and 15 Direct3D 12 apps, 3 at a time, with or without it. So what the change does for
+  these refusals is not measured (2026-11-21).
 - Preemption only between DMA buffers: a preemption is reported once the node has nothing left; the first 64 and
   every 256th that wait for a node's buffers are logged with its fences.
 - At a GPU timeout (bug check 0x117 or 0x141) `DxgkDdiCollectDbgInfo` writes the nodes with buffers not done (their
@@ -76,6 +79,11 @@ display-only driver in `viogpu` stays as it is.
   290 KB (`ProgramData\Microsoft\Windows\WER\ReportQueue\Kernel_117_*\WATCHDOG-*.dmp`). Of four timeouts in one
   guest, before and after a restart, only the first left a live dump in `LiveKernelReports`; for the others
   `WerLiveKernelCreateReport` failed with `0xc0000022` (2026-11-20).
+- `DxgkDdiQueryCurrentFence`, `DxgkDdiResetEngine` and `DxgkDdiResetFromTimeout` hold the nodes' spin lock, so their
+  code is not pageable. In the `PAGE` section, dxgkrnl's recovery 12 s after a GPU timeout stopped a guest with bug
+  check 0xD1 (`DRIVER_IRQL_NOT_LESS_OR_EQUAL`): an execute at IRQL 2 in `DxgkDdiResetFromTimeout`'s loop over the
+  nodes, under that lock, on a page of `PAGE` that was not resident. Out of `PAGE`, the one recovery measured since
+  returned (2026-11-21).
 
 ## Interface for user-mode drivers
 
@@ -221,12 +229,17 @@ merge request 38731): the same tags and layouts.
   (without the id change above), `a4bd0b1e`, `a4bd0b1e`, this tree, at a load average of 1.6 to 5.7: this tree timed
   out in neither run, `a4bd0b1e` twice in its first (in the restart after the install, and 14 s after the DWM restart,
   in the run with the refused blob creates above) and not in its second. No install in place timed out, and the
-  compile lines were 202, 835, 9 and 385 (2026-11-21). On the host, `MTL4Archive` and `MTLBinaryArchive` skip the
-  pipeline state but not the library from MSL source: in a new process, 20 pipelines' libraries took 2.23 and 2.25 s
-  with the two archives and 2.22 s without. A second context in one process found them in 0.7 ms. But a render server
-  that gives a new Venus context the process of an ended one, which keeps its part of Metal's cache, did worse in the
-  guest, one run each from an empty cache at a load average of 2 to 6: 1894 and 847 compile lines against 840, and 6 and
-  5 timeouts against 2, with any idle process and with only one whose context had the same name (2026-11-21).
+  compile lines were 202, 835, 9 and 385 (2026-11-21). Four more runs of those steps on OSMates main 75402121 with the
+  render server logging each Venus command of 20 ms or more, in the order `a4bd0b1e`, this tree, `a4bd0b1e`, this tree,
+  each started at a load average of 3.3 to 7.2 (the first two ended before the DWM restart), timed out once: this tree
+  in its first run's install in place, with 5 EXEC_BUF fences unsignalled, which the host signalled 2.9 s after the
+  guest asked. The compile lines were 70, 343, 85 and 159 (2026-11-21). On the host, `MTL4Archive` and
+  `MTLBinaryArchive` skip the pipeline state but not the library from MSL source: in a new process, 20 pipelines'
+  libraries took 2.23 and 2.25 s with the two archives and 2.22 s without. A second context in one process found them in
+  0.7 ms. But a render server that gives a new Venus context the process of an ended one, which keeps its part of
+  Metal's cache, did worse in the guest, one run each from an empty cache at a load average of 2 to 6: 1894 and 847
+  compile lines against 840, and 6 and 5 timeouts against 2, with any idle process and with only one whose context had
+  the same name (2026-11-21).
 - Processes keep their views of host-visible blobs past the device's reset. With a test package whose flips wait for
   the host, processes wrote blobs the host had dropped in 3 of 5 restarts and stops of Windows (2026-11-20; none with
   this tree), the two writes placed from Venus's command encoders (`vn_CmdBindIndexBuffer2`, `vn_CmdBeginRendering`).
