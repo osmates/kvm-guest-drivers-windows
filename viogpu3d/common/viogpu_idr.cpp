@@ -66,7 +66,8 @@ ULONG VioGpuIdr::GetId(VOID)
     }
     else
     {
-        id = m_nextId++;
+        // Devices of several processes create allocations and contexts at the same time.
+        id = (ULONG)InterlockedIncrement((volatile LONG *)&m_nextId) - 1;
     }
 
     DbgPrint(TRACE_LEVEL_VERBOSE, ("[%s] id = %d\n", __FUNCTION__, id));

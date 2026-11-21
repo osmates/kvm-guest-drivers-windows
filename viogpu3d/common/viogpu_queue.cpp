@@ -1136,8 +1136,12 @@ static void WaitedBufferAnswered(void *ctx)
     KeSetEvent(&buf->wait_event, IO_NO_INCREMENT, FALSE);
 }
 
-BOOLEAN CtrlQueue::QueueBufferAndWait(PGPU_VBUFFER buf, ULONG timeoutMs)
+BOOLEAN CtrlQueue::QueueBufferAndWait(PGPU_VBUFFER buf, ULONG timeoutMs, _Out_opt_ BOOLEAN *pLate)
 {
+    if (pLate != NULL)
+    {
+        *pLate = FALSE;
+    }
     KeInitializeEvent(&buf->wait_event, NotificationEvent, FALSE);
     buf->wait_state = 0;
     buf->complete_cb = WaitedBufferAnswered;
@@ -1157,6 +1161,10 @@ BOOLEAN CtrlQueue::QueueBufferAndWait(PGPU_VBUFFER buf, ULONG timeoutMs)
     {
         DbgPrint(TRACE_LEVEL_FATAL,
                  ("<--> %s no reply to command %x\n", __FUNCTION__, ((PGPU_CTRL_HDR)buf->buf)->type));
+        if (pLate != NULL)
+        {
+            *pLate = TRUE;
+        }
         return FALSE;
     }
     // Answered, possibly just as the wait ended: the event is set or about to be.
@@ -1241,9 +1249,10 @@ UINT CtrlQueue::CreateContext(UINT ctxId, UINT capsetId, _In_reads_bytes_(nameLe
     cmd->nlen = min(nameLength, (UINT)VIRTIO_GPU_CONTEXT_NAME_SIZE);
     RtlCopyMemory(cmd->debug_name, name, cmd->nlen);
 
-    if (!QueueBufferAndWait(vbuf, 1000))
+    BOOLEAN late;
+    if (!QueueBufferAndWait(vbuf, 1000, &late))
     {
-        return VIRTIO_GPU_RESP_ERR_UNSPEC;
+        return late ? VIOGPU_RESP_LATE : VIRTIO_GPU_RESP_ERR_UNSPEC;
     }
     UINT type = ReplyType(vbuf);
     ReleaseBuffer(vbuf);
@@ -1305,9 +1314,10 @@ UINT CtrlQueue::CreateBlob(UINT ctxId,
         vbuf->data_size = sizeof(*ents) * nents;
     }
 
-    if (!QueueBufferAndWait(vbuf, 1000))
+    BOOLEAN late;
+    if (!QueueBufferAndWait(vbuf, 1000, &late))
     {
-        return VIRTIO_GPU_RESP_ERR_UNSPEC;
+        return late ? VIOGPU_RESP_LATE : VIRTIO_GPU_RESP_ERR_UNSPEC;
     }
     UINT type = ReplyType(vbuf);
     ReleaseBuffer(vbuf);
@@ -1324,9 +1334,10 @@ UINT CtrlQueue::CreateResource3D(UINT ctxId, _In_ const GPU_CMD_RES_CREATE_3D *c
     cmd->hdr.fence_id = 0;
     cmd->hdr.ctx_id = ctxId;
 
-    if (!QueueBufferAndWait(vbuf, 1000))
+    BOOLEAN late;
+    if (!QueueBufferAndWait(vbuf, 1000, &late))
     {
-        return VIRTIO_GPU_RESP_ERR_UNSPEC;
+        return late ? VIOGPU_RESP_LATE : VIRTIO_GPU_RESP_ERR_UNSPEC;
     }
     UINT type = ReplyType(vbuf);
     ReleaseBuffer(vbuf);

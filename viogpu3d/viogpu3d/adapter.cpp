@@ -325,12 +325,28 @@ NTSTATUS VioGpu3dAdapter::CreateOwnContext(void)
         DbgPrint(TRACE_LEVEL_FATAL, ("%s the driver's Venus context refused with %x\n", __FUNCTION__, reply));
         if (fresh)
         {
-            ctxIdr.PutId(m_OwnCtxId);
+            ReleaseFailedContextId(m_OwnCtxId, reply);
             m_OwnCtxId = 0;
         }
         return STATUS_UNSUCCESSFUL;
     }
     return STATUS_SUCCESS;
+}
+
+void VioGpu3dAdapter::ReleaseFailedContextId(UINT ctxId, UINT reply)
+{
+    PAGED_CODE();
+
+    // The queue keeps the order: this destroy runs after a create the host answered late.
+    if (reply == VIOGPU_RESP_LATE)
+    {
+        ctrlQueue.DestroyContext(ctxId);
+    }
+    // Another context has this id on the host.
+    if (reply != VIRTIO_GPU_RESP_ERR_INVALID_CONTEXT_ID)
+    {
+        ctxIdr.PutId(ctxId);
+    }
 }
 
 void VioGpu3dAdapter::DestroyOwnContext(void)

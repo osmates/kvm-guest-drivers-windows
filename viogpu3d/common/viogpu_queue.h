@@ -65,6 +65,9 @@ typedef struct virtio_gpu_vbuffer
 } GPU_VBUFFER, *PGPU_VBUFFER;
 // #pragma pack()
 
+// A create command the host took and did not answer in time: it may still make the resource or context later.
+#define VIOGPU_RESP_LATE     0
+
 #define MAX_INLINE_CMD_SIZE  96
 #define MAX_INLINE_RESP_SIZE 24
 #define VBUFFER_SIZE         (sizeof(GPU_VBUFFER) + MAX_INLINE_CMD_SIZE + MAX_INLINE_RESP_SIZE)
@@ -242,9 +245,8 @@ class CtrlQueue : public VioGpuQueue
     UINT QueueBuffer(PGPU_VBUFFER buf);
     PGPU_VBUFFER DequeueBuffer(_Out_ UINT *len);
 
-    // Sends the buffer and waits for its reply. TRUE: the caller reads the reply and releases the buffer. FALSE: it
-    // could not be sent or no reply came in time, and the buffer is no longer the caller's.
-    BOOLEAN QueueBufferAndWait(PGPU_VBUFFER buf, ULONG timeoutMs);
+    // TRUE: read the reply, then release the buffer. FALSE: not sent, or sent and late (*pLate); not the caller's.
+    BOOLEAN QueueBufferAndWait(PGPU_VBUFFER buf, ULONG timeoutMs, _Out_opt_ BOOLEAN *pLate = NULL);
 
     void CreateResource(UINT res_id, UINT format, UINT width, UINT height);
     void DestroyResource(UINT id);
@@ -263,6 +265,7 @@ class CtrlQueue : public VioGpuQueue
     // The capability set's bytes, at most `size` of them, into `data`.
     BOOLEAN AskCapset(UINT capsetId, UINT version, UINT size, _Out_writes_bytes_(size) PVOID data);
 
+    // The create commands give VIOGPU_RESP_LATE when the host took the command and did not answer in time.
     UINT CreateContext(UINT ctxId, UINT capsetId, _In_reads_bytes_(nameLength) const CHAR *name, UINT nameLength);
     void DestroyContext(UINT ctxId);
     UINT AttachResourceToContext(UINT ctxId, UINT resId, BOOLEAN attach);

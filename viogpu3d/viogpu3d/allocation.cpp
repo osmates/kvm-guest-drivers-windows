@@ -151,6 +151,8 @@ VioGpu3dAllocation::VioGpu3dAllocation(VioGpu3dAdapter *adapter)
     RtlZeroMemory(&m_Info, sizeof(m_Info));
     m_ResId = 0;
     m_Created = FALSE;
+    m_CreateLate = FALSE;
+    m_IdInUse = FALSE;
     m_CreatorCtxId = 0;
     m_pPrelude = NULL;
     m_PreludeSize = 0;
@@ -185,13 +187,23 @@ VioGpu3dAllocation::~VioGpu3dAllocation()
     }
     if (m_ResId != 0)
     {
-        if (m_Created)
+        // The queue keeps the order: this unref runs after a create the host answered late.
+        if (m_Created || m_CreateLate)
         {
             m_pAdapter->ctrlQueue.DestroyResource(m_ResId);
         }
-        m_pAdapter->resourceIdr.PutId(m_ResId);
+        if (!m_IdInUse)
+        {
+            m_pAdapter->resourceIdr.PutId(m_ResId);
+        }
     }
     delete[] m_pPrelude;
+}
+
+void VioGpu3dAllocation::NoteFailedCreate(UINT reply)
+{
+    m_CreateLate = reply == VIOGPU_RESP_LATE;
+    m_IdInUse = reply == VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
 }
 
 NTSTATUS VioGpu3dAllocation::Init(_Inout_ DXGK_ALLOCATIONINFO *pInfo,
@@ -323,8 +335,11 @@ NTSTATUS VioGpu3dAllocation::Init(_Inout_ DXGK_ALLOCATIONINFO *pInfo,
         create.last_level = p3d->LastLevel;
         create.nr_samples = p3d->NrSamples;
         create.flags = p3d->Flags;
-        if (m_pAdapter->ctrlQueue.CreateResource3D(0, &create) != VIRTIO_GPU_RESP_OK_NODATA)
+        UINT reply = m_pAdapter->ctrlQueue.CreateResource3D(0, &create);
+        if (reply != VIRTIO_GPU_RESP_OK_NODATA)
         {
+            NoteFailedCreate(reply);
+            DbgPrint(TRACE_LEVEL_ERROR, ("%s 3D resource %u refused with %x\n", __FUNCTION__, m_ResId, reply));
             return STATUS_UNSUCCESSFUL;
         }
         m_Created = TRUE;
@@ -392,8 +407,9 @@ NTSTATUS VioGpu3dAllocation::InitKernelSurface(_Inout_ DXGK_ALLOCATIONINFO *pInf
                                                   0);
     if (reply != VIRTIO_GPU_RESP_OK_NODATA)
     {
+        NoteFailedCreate(reply);
         DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s surface of type %u refused with %x\n", __FUNCTION__, pSurface->StandardType, reply));
+                 ("%s surface %u of type %u refused with %x\n", __FUNCTION__, m_ResId, pSurface->StandardType, reply));
         return STATUS_UNSUCCESSFUL;
     }
     m_Created = TRUE;
@@ -490,6 +506,7 @@ NTSTATUS VioGpu3dAllocation::CreateOnHost(_In_ VioGpu3dDevice *pDevice)
                                                   0);
     if (reply != VIRTIO_GPU_RESP_OK_NODATA)
     {
+        NoteFailedCreate(reply);
         DbgPrint(TRACE_LEVEL_ERROR, ("%s blob %u refused with %x\n", __FUNCTION__, m_ResId, reply));
         return STATUS_UNSUCCESSFUL;
     }
