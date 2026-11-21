@@ -1379,10 +1379,30 @@ void VioGpu3dAdapter::ConfigChanged(void)
     }
 }
 
-NTSTATUS VioGpu3dAdapter::QueryCurrentFence(_Inout_ DXGKARG_QUERYCURRENTFENCE *pCurrentFence)
+NTSTATUS VioGpu3dAdapter::QueryEngineStatus(_Inout_ DXGKARG_QUERYENGINESTATUS *pQueryEngineStatus)
 {
     PAGED_CODE();
 
+    pQueryEngineStatus->EngineStatus.Responsive = 1;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS VioGpu3dAdapter::RestartFromTimeout(VOID)
+{
+    PAGED_CODE();
+
+    return STATUS_SUCCESS;
+}
+
+PAGED_CODE_SEG_END
+
+//
+// Non-paged code: interrupts, DPCs and what they call.
+//
+
+// Not paged: it holds m_NodeLock.
+NTSTATUS VioGpu3dAdapter::QueryCurrentFence(_Inout_ DXGKARG_QUERYCURRENTFENCE *pCurrentFence)
+{
     if (pCurrentFence->NodeOrdinal >= VIOGPU3D_NODE_COUNT)
     {
         return STATUS_INVALID_PARAMETER;
@@ -1394,18 +1414,9 @@ NTSTATUS VioGpu3dAdapter::QueryCurrentFence(_Inout_ DXGKARG_QUERYCURRENTFENCE *p
     return STATUS_SUCCESS;
 }
 
-NTSTATUS VioGpu3dAdapter::QueryEngineStatus(_Inout_ DXGKARG_QUERYENGINESTATUS *pQueryEngineStatus)
-{
-    PAGED_CODE();
-
-    pQueryEngineStatus->EngineStatus.Responsive = 1;
-    return STATUS_SUCCESS;
-}
-
+// Not paged: it holds m_NodeLock.
 NTSTATUS VioGpu3dAdapter::ResetEngine(_Inout_ DXGKARG_RESETENGINE *pResetEngine)
 {
-    PAGED_CODE();
-
     if (pResetEngine->NodeOrdinal >= VIOGPU3D_NODE_COUNT)
     {
         return STATUS_INVALID_PARAMETER;
@@ -1433,10 +1444,9 @@ NTSTATUS VioGpu3dAdapter::ResetEngine(_Inout_ DXGKARG_RESETENGINE *pResetEngine)
     return STATUS_SUCCESS;
 }
 
+// Not paged: it holds m_NodeLock.
 NTSTATUS VioGpu3dAdapter::ResetFromTimeout(VOID)
 {
-    PAGED_CODE();
-
     KIRQL irql;
     KeAcquireSpinLock(&m_NodeLock, &irql);
     for (UINT node = 0; node < VIOGPU3D_NODE_COUNT; node++)
@@ -1465,19 +1475,6 @@ NTSTATUS VioGpu3dAdapter::ResetFromTimeout(VOID)
     KeWaitForSingleObject(&m_PresentIdle, Executive, KernelMode, FALSE, NULL);
     return STATUS_SUCCESS;
 }
-
-NTSTATUS VioGpu3dAdapter::RestartFromTimeout(VOID)
-{
-    PAGED_CODE();
-
-    return STATUS_SUCCESS;
-}
-
-PAGED_CODE_SEG_END
-
-//
-// Non-paged code: interrupts, DPCs and what they call.
-//
 
 VOID VioGpu3dAdapter::ResetDevice(VOID)
 {
