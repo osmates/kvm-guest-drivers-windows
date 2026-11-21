@@ -1419,60 +1419,11 @@ void VioGpu3dAdapter::ConfigChanged(void)
     }
 }
 
-NTSTATUS VioGpu3dAdapter::QueryCurrentFence(_Inout_ DXGKARG_QUERYCURRENTFENCE *pCurrentFence)
-{
-    PAGED_CODE();
-
-    if (pCurrentFence->NodeOrdinal >= VIOGPU3D_NODE_COUNT)
-    {
-        return STATUS_INVALID_PARAMETER;
-    }
-    KIRQL irql;
-    KeAcquireSpinLock(&m_NodeLock, &irql);
-    pCurrentFence->CurrentFence = m_Nodes[pCurrentFence->NodeOrdinal].LastCompleted;
-    KeReleaseSpinLock(&m_NodeLock, irql);
-    return STATUS_SUCCESS;
-}
-
 NTSTATUS VioGpu3dAdapter::QueryEngineStatus(_Inout_ DXGKARG_QUERYENGINESTATUS *pQueryEngineStatus)
 {
     PAGED_CODE();
 
     pQueryEngineStatus->EngineStatus.Responsive = 1;
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS VioGpu3dAdapter::ResetEngine(_Inout_ DXGKARG_RESETENGINE *pResetEngine)
-{
-    PAGED_CODE();
-
-    if (pResetEngine->NodeOrdinal >= VIOGPU3D_NODE_COUNT)
-    {
-        return STATUS_INVALID_PARAMETER;
-    }
-    CHAR text[480];
-    DescribeNodes(text, sizeof(text));
-    DbgPrint(TRACE_LEVEL_ERROR, ("reset engine: node %u, %s\n", pResetEngine->NodeOrdinal, text));
-    // The host runs what it was given; this engine's waits are given up, and their fences reported done.
-    KIRQL irql;
-    KeAcquireSpinLock(&m_NodeLock, &irql);
-    VIOGPU3D_NODE_STATE *pNode = &m_Nodes[pResetEngine->NodeOrdinal];
-    while (!IsListEmpty(&pNode->Pending))
-    {
-        VIOGPU3D_DMA *pDma = CONTAINING_RECORD(RemoveHeadList(&pNode->Pending), VIOGPU3D_DMA, Link);
-        pNode->LastCompleted = pDma->FenceId;
-        if (pDma->Outstanding == 0)
-        {
-            delete pDma;
-        }
-        else
-        {
-            // Its last release frees it.
-            pDma->Done = TRUE;
-        }
-    }
-    pResetEngine->LastAbortedFenceId = pNode->LastCompleted;
-    KeReleaseSpinLock(&m_NodeLock, irql);
     return STATUS_SUCCESS;
 }
 
@@ -1493,43 +1444,6 @@ NTSTATUS VioGpu3dAdapter::CollectDbgInfo(_In_ CONST DXGKARG_COLLECTDBGINFO *pCol
                            pCollectDbgInfo->Reason,
                            text);
     }
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS VioGpu3dAdapter::ResetFromTimeout(VOID)
-{
-    PAGED_CODE();
-
-    CHAR text[480];
-    DescribeNodes(text, sizeof(text));
-    DbgPrint(TRACE_LEVEL_ERROR, ("reset from timeout: %s\n", text));
-
-    KIRQL irql;
-    KeAcquireSpinLock(&m_NodeLock, &irql);
-    for (UINT node = 0; node < VIOGPU3D_NODE_COUNT; node++)
-    {
-        VIOGPU3D_NODE_STATE *pNode = &m_Nodes[node];
-        while (!IsListEmpty(&pNode->Pending))
-        {
-            VIOGPU3D_DMA *pDma = CONTAINING_RECORD(RemoveHeadList(&pNode->Pending), VIOGPU3D_DMA, Link);
-            if (pDma->Outstanding == 0)
-            {
-                delete pDma;
-            }
-            else
-            {
-                // A fence the host still owes keeps the entry; its signal frees it.
-                pDma->Done = TRUE;
-            }
-        }
-        pNode->LastSubmitted = 0;
-        pNode->LastCompleted = 0;
-        pNode->PreemptRequested = FALSE;
-    }
-    KeReleaseSpinLock(&m_NodeLock, irql);
-    RunPresents(FALSE);
-    // dxgkrnl may free the allocations once this returns, so no copy may still run.
-    KeWaitForSingleObject(&m_PresentIdle, Executive, KernelMode, FALSE, NULL);
     return STATUS_SUCCESS;
 }
 
@@ -1622,6 +1536,89 @@ void VioGpu3dAdapter::DescribeNodes(_Out_writes_bytes_(size) PCHAR pText, SIZE_T
                              busy[i].Outstanding,
                              busy[i].Preempt ? ", preemption asked" : "");
     }
+}
+
+// Not paged: it holds m_NodeLock.
+NTSTATUS VioGpu3dAdapter::QueryCurrentFence(_Inout_ DXGKARG_QUERYCURRENTFENCE *pCurrentFence)
+{
+    if (pCurrentFence->NodeOrdinal >= VIOGPU3D_NODE_COUNT)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+    KIRQL irql;
+    KeAcquireSpinLock(&m_NodeLock, &irql);
+    pCurrentFence->CurrentFence = m_Nodes[pCurrentFence->NodeOrdinal].LastCompleted;
+    KeReleaseSpinLock(&m_NodeLock, irql);
+    return STATUS_SUCCESS;
+}
+
+// Not paged: it holds m_NodeLock.
+NTSTATUS VioGpu3dAdapter::ResetEngine(_Inout_ DXGKARG_RESETENGINE *pResetEngine)
+{
+    if (pResetEngine->NodeOrdinal >= VIOGPU3D_NODE_COUNT)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+    CHAR text[480];
+    DescribeNodes(text, sizeof(text));
+    DbgPrint(TRACE_LEVEL_ERROR, ("reset engine: node %u, %s\n", pResetEngine->NodeOrdinal, text));
+    // The host runs what it was given; this engine's waits are given up, and their fences reported done.
+    KIRQL irql;
+    KeAcquireSpinLock(&m_NodeLock, &irql);
+    VIOGPU3D_NODE_STATE *pNode = &m_Nodes[pResetEngine->NodeOrdinal];
+    while (!IsListEmpty(&pNode->Pending))
+    {
+        VIOGPU3D_DMA *pDma = CONTAINING_RECORD(RemoveHeadList(&pNode->Pending), VIOGPU3D_DMA, Link);
+        pNode->LastCompleted = pDma->FenceId;
+        if (pDma->Outstanding == 0)
+        {
+            delete pDma;
+        }
+        else
+        {
+            // Its last release frees it.
+            pDma->Done = TRUE;
+        }
+    }
+    pResetEngine->LastAbortedFenceId = pNode->LastCompleted;
+    KeReleaseSpinLock(&m_NodeLock, irql);
+    return STATUS_SUCCESS;
+}
+
+// Not paged: it holds m_NodeLock.
+NTSTATUS VioGpu3dAdapter::ResetFromTimeout(VOID)
+{
+    CHAR text[480];
+    DescribeNodes(text, sizeof(text));
+    DbgPrint(TRACE_LEVEL_ERROR, ("reset from timeout: %s\n", text));
+
+    KIRQL irql;
+    KeAcquireSpinLock(&m_NodeLock, &irql);
+    for (UINT node = 0; node < VIOGPU3D_NODE_COUNT; node++)
+    {
+        VIOGPU3D_NODE_STATE *pNode = &m_Nodes[node];
+        while (!IsListEmpty(&pNode->Pending))
+        {
+            VIOGPU3D_DMA *pDma = CONTAINING_RECORD(RemoveHeadList(&pNode->Pending), VIOGPU3D_DMA, Link);
+            if (pDma->Outstanding == 0)
+            {
+                delete pDma;
+            }
+            else
+            {
+                // A fence the host still owes keeps the entry; its signal frees it.
+                pDma->Done = TRUE;
+            }
+        }
+        pNode->LastSubmitted = 0;
+        pNode->LastCompleted = 0;
+        pNode->PreemptRequested = FALSE;
+    }
+    KeReleaseSpinLock(&m_NodeLock, irql);
+    RunPresents(FALSE);
+    // dxgkrnl may free the allocations once this returns, so no copy may still run.
+    KeWaitForSingleObject(&m_PresentIdle, Executive, KernelMode, FALSE, NULL);
+    return STATUS_SUCCESS;
 }
 
 VOID VioGpu3dAdapter::ResetDevice(VOID)
