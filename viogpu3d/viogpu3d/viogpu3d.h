@@ -186,6 +186,7 @@ class VioGpu3dAllocation
                   UINT resourceSize);
     // The host resource, made in the creating device's context once the runtime binds the allocation to it.
     NTSTATUS CreateOnHost(_In_ VioGpu3dDevice *pDevice);
+    void NoteFailedCreate(UINT reply);
     NTSTATUS Open(_In_ VioGpu3dDevice *pDevice);
     void Close(_In_ VioGpu3dDevice *pDevice);
 
@@ -264,6 +265,10 @@ class VioGpu3dAllocation
     VIRTIO_WDDM_CREATE_ALLOCATION m_Info;
     UINT m_ResId;
     BOOLEAN m_Created;
+    // A create the host took without answering in time: the host may still make the resource.
+    BOOLEAN m_CreateLate;
+    // The host refused the create because another resource has the id: the id is not this allocation's to free.
+    BOOLEAN m_IdInUse;
     UINT m_CreatorCtxId;
     PUCHAR m_pPrelude;
     UINT m_PreludeSize;
@@ -438,6 +443,8 @@ class VioGpu3dAdapter final : IVioGpuPCI
     VioGpuVidPN *vidpn;
     VioGpuIdr resourceIdr;
     VioGpuIdr ctxIdr;
+    // After CTX_CREATE failed: a late create is destroyed in queue order, and an id the host has stays out of use.
+    void ReleaseFailedContextId(UINT ctxId, UINT reply);
     CtrlQueue ctrlQueue;
     VioGpuMemSegment frameSegment;
     UINT64 m_u64HostFeatures;

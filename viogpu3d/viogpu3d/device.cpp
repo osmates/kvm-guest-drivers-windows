@@ -91,8 +91,8 @@ NTSTATUS VioGpu3dDevice::InitContext(_In_ const VIRTIO_WDDM_CONTEXT_INIT *pInit)
     if (reply != VIRTIO_GPU_RESP_OK_NODATA)
     {
         DbgPrint(TRACE_LEVEL_ERROR,
-                 ("%s context of capset %u refused with %x\n", __FUNCTION__, pInit->CapsetId, reply));
-        m_pAdapter->ctxIdr.PutId(ctxId);
+                 ("%s context %u of capset %u refused with %x\n", __FUNCTION__, ctxId, pInit->CapsetId, reply));
+        m_pAdapter->ReleaseFailedContextId(ctxId, reply);
         return STATUS_UNSUCCESSFUL;
     }
     m_CtxId = ctxId;
