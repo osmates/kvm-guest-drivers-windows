@@ -160,10 +160,12 @@ merge request 38731): the same tags and layouts.
   have a CPU view only if VidMm maps them again. A live install of a package with the node split over one without it,
   and over another with it, gave `VIDEO_TDR_TIMEOUT_DETECTED` live dumps (0x117) while the device restarted; installs
   on the 2D driver and the boots and apps after gave none.
-- What a node reset leaves running is not measured. The one GPU timeout seen with it came within a minute of a live
-  install on a fresh guest, with no kernel trace running: a `VIDEO_ENGINE_TIMEOUT_DETECTED` live dump (0x141), no
-  0x117 and no bug check. After the restart, at a host load of 33 to 37, vkcube ran 600 frames through Vulkan and
-  through DXGI with no timeout (2026-11-25).
+- What a node reset leaves running is not measured. Every GPU timeout seen with it came during a live install on a
+  fresh guest, as `VIDEO_ENGINE_TIMEOUT_DETECTED` live dumps (0x141) with no 0x117 and no bug check. With a kernel
+  trace running, at a host load of about 6, the install gave four node resets, on nodes 3 and 4 with 0 to 2 DMA
+  buffers aborted each, and three such dumps. DWM restarted across that install, which also restarts the adapter, so
+  what the resets did to it is not known. After the restart, at host loads of 12 to 37, vkcube ran 600 frames
+  through Vulkan and through DXGI with no timeout (2026-11-25).
 - After a node reset the device put in the error state is the one that queued the node's last DMA buffer, which need
   not be the one whose stream timed out. Node 1 carries DWM's present and queue contexts with every Direct3D
   process's, so a timeout there can take DWM's device. Not measured.
