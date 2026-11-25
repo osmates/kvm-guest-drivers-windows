@@ -58,6 +58,9 @@ display-only driver in `viogpu` stays as it is.
 - One Venus context of the driver's own, made at start, which gets no Venus command: its blobs are plain shared
   memory on the host.
 - Preemption only between DMA buffers: a preemption is reported once the node has nothing left.
+- A GPU timeout resets its node alone (`SupportPerEngineTDR`, each node its own engine group). The host already has
+  every command of the node's DMA buffers, so `DxgkDdiResetEngine` aborts all of them and reports the last as the last
+  aborted fence. The WDK has dxgkrnl put the devices of aborted buffers in the error state, not every device.
 
 ## Interface for user-mode drivers
 
@@ -163,7 +166,6 @@ merge request 38731): the same tags and layouts.
   entry Windows shows one display, this adapter's, at boot and after a sign-in. With no entry for the monitors it
   extends the desktop onto Basic Display's output at boot, until the agent's next `display/set` (measured 2026-11-19).
   No documented DDI or callback retires that Basic Display or chooses Windows' topology.
-- `SupportPerEngineTDR` stays off: with it dxgkrnl refuses to start the adapter.
 - A D3D9 DDI. D3D9 lists this adapter now that it drives the display, and a HAL device fails with
   `D3DERR_NOTAVAILABLE`; apps that call `Direct3DCreate9On12` get a HAL device through D3D9On12 (2026-11-19).
 - Another process opening the surfaces above through Venus, and CDD's blts into the primary once DWM runs: not

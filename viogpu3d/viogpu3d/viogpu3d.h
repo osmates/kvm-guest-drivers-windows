@@ -93,6 +93,8 @@ struct VIOGPU3D_NODE_STATE
     UINT LastCompleted;
     BOOLEAN PreemptRequested;
     UINT PreemptionFenceId;
+    // LastCompleted at the last DxgkDdiQueryEngineStatus.
+    UINT QueriedCompleted;
 };
 
 #define VIOGPU3D_FENCE_WAITERS 4
@@ -513,6 +515,7 @@ class VioGpu3dAdapter final : IVioGpuPCI
     NTSTATUS SubmitCommand(_In_ CONST DXGKARG_SUBMITCOMMAND *pSubmitCommand);
     NTSTATUS PreemptCommand(_In_ CONST DXGKARG_PREEMPTCOMMAND *pPreemptCommand);
     NTSTATUS QueryCurrentFence(_Inout_ DXGKARG_QUERYCURRENTFENCE *pCurrentFence);
+    NTSTATUS QueryDependentEngineGroup(_Inout_ DXGKARG_QUERYDEPENDENTENGINEGROUP *pQueryDependentEngineGroup);
     NTSTATUS QueryEngineStatus(_Inout_ DXGKARG_QUERYENGINESTATUS *pQueryEngineStatus);
     NTSTATUS ResetEngine(_Inout_ DXGKARG_RESETENGINE *pResetEngine);
     NTSTATUS ResetFromTimeout(VOID);
@@ -602,6 +605,7 @@ class VioGpu3dAdapter final : IVioGpuPCI
     NTSTATUS CreateOwnContext(void);
     void DestroyOwnContext(void);
     VIOGPU3D_PRESENT_WORK *TakePresentWork(BOOLEAN run);
+    void TakeNodePresentWork(UINT node, _Out_ PLIST_ENTRY pList);
     void RunPresents(BOOLEAN execute);
     void RunPresentOp(_In_ const VIOGPU3D_PRESENT_OP *pOp);
 
