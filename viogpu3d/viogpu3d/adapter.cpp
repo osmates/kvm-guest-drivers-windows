@@ -1436,14 +1436,15 @@ NTSTATUS VioGpu3dAdapter::QueryCurrentFence(_Inout_ DXGKARG_QUERYCURRENTFENCE *p
     return STATUS_SUCCESS;
 }
 
-// Not paged: it holds m_NodeLock. A node makes progress while it has nothing pending or completed a DMA buffer since
-// the last query.
+// Not paged: holds m_NodeLock; progress means nothing pending or a completion since the last query.
 NTSTATUS VioGpu3dAdapter::QueryEngineStatus(_Inout_ DXGKARG_QUERYENGINESTATUS *pQueryEngineStatus)
 {
     UINT node = pQueryEngineStatus->NodeOrdinal;
+    pQueryEngineStatus->EngineStatus.Value = 0;
+    // The WDK has this DDI always succeed.
     if (node >= VIOGPU3D_NODE_COUNT)
     {
-        return STATUS_INVALID_PARAMETER;
+        return STATUS_SUCCESS;
     }
     KIRQL irql;
     KeAcquireSpinLock(&m_NodeLock, &irql);
@@ -1453,7 +1454,6 @@ NTSTATUS VioGpu3dAdapter::QueryEngineStatus(_Inout_ DXGKARG_QUERYENGINESTATUS *p
     UINT lastCompleted = pNode->LastCompleted;
     UINT lastSubmitted = pNode->LastSubmitted;
     KeReleaseSpinLock(&m_NodeLock, irql);
-    pQueryEngineStatus->EngineStatus.Value = 0;
     pQueryEngineStatus->EngineStatus.Responsive = responsive ? 1 : 0;
     if (!responsive)
     {
@@ -1463,8 +1463,7 @@ NTSTATUS VioGpu3dAdapter::QueryEngineStatus(_Inout_ DXGKARG_QUERYENGINESTATUS *p
     return STATUS_SUCCESS;
 }
 
-// Not paged: it holds m_NodeLock. The host already has every command of the node's DMA buffers, so none may run
-// again: all of them are aborted, and the last of them is the last aborted fence.
+// Not paged: holds m_NodeLock; the host has every command, so all pending buffers are aborted.
 NTSTATUS VioGpu3dAdapter::ResetEngine(_Inout_ DXGKARG_RESETENGINE *pResetEngine)
 {
     UINT node = pResetEngine->NodeOrdinal;
