@@ -60,7 +60,9 @@ display-only driver in `viogpu` stays as it is.
 - Preemption only between DMA buffers: a preemption is reported once the node has nothing left.
 - A GPU timeout resets its node alone (`SupportPerEngineTDR`, each node its own engine group). The host already has
   every command of the node's DMA buffers, so `DxgkDdiResetEngine` aborts all of them and reports the last as the last
-  aborted fence. The WDK has dxgkrnl put the devices of aborted buffers in the error state, not every device.
+  aborted fence. The WDK has dxgkrnl put the devices of aborted buffers in the error state, not every device. dxgkrnl
+  starts the adapter with the cap and `DxgkDdiQueryDependentEngineGroup` (problem code 0, 2026-11-25); a driver that
+  set the cap without that DDI failed to start with `StartAdapter_AddAdapterFailed`.
 
 ## Interface for user-mode drivers
 
@@ -157,6 +159,10 @@ merge request 38731): the same tags and layouts.
   have a CPU view only if VidMm maps them again. A live install of a package with the node split over one without it,
   and over another with it, gave `VIDEO_TDR_TIMEOUT_DETECTED` live dumps (0x117) while the device restarted; installs
   on the 2D driver and the boots and apps after gave none.
+- What a node reset leaves running is not measured. The one GPU timeout seen with it came within a minute of a live
+  install on a fresh guest, with no kernel trace running: a `VIDEO_ENGINE_TIMEOUT_DETECTED` live dump (0x141), no
+  0x117 and no bug check. After the restart, at a host load of 33 to 37, vkcube ran 600 frames through Vulkan and
+  through DXGI with no timeout (2026-11-25).
 - dxgkrnl logs "The root page directory is not set" on the DMA packets of processes that map no GPU virtual address
   (Venus maps none), and refuses Venus's hardware queue context while the driver reports WDDM 2.0 ("the driver WDDM
   version is < 2.5"); Venus then opens a context per ring.
