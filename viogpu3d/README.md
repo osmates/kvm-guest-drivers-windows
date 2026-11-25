@@ -60,7 +60,8 @@ display-only driver in `viogpu` stays as it is.
 - Preemption only between DMA buffers: a preemption is reported once the node has nothing left.
 - A GPU timeout resets its node alone (`SupportPerEngineTDR`, each node its own engine group). The host already has
   every command of the node's DMA buffers, so `DxgkDdiResetEngine` aborts all of them and reports the last as the last
-  aborted fence. The WDK has dxgkrnl put the devices of aborted buffers in the error state, not every device.
+  aborted fence: per the WDK, dxgkrnl resubmits the buffers after that fence, which would send the host their commands
+  twice, and puts the device of the buffer at that fence in the error state.
 
 ## Interface for user-mode drivers
 
@@ -157,6 +158,9 @@ merge request 38731): the same tags and layouts.
   have a CPU view only if VidMm maps them again. A live install of a package with the node split over one without it,
   and over another with it, gave `VIDEO_TDR_TIMEOUT_DETECTED` live dumps (0x117) while the device restarted; installs
   on the 2D driver and the boots and apps after gave none.
+- After a node reset the device put in the error state is the one that queued the node's last DMA buffer, which need
+  not be the one whose stream timed out. Node 1 carries DWM's present and queue contexts with every Direct3D
+  process's, so a timeout there can take DWM's device. Not measured.
 - dxgkrnl logs "The root page directory is not set" on the DMA packets of processes that map no GPU virtual address
   (Venus maps none), and refuses Venus's hardware queue context while the driver reports WDDM 2.0 ("the driver WDDM
   version is < 2.5"); Venus then opens a context per ring.
