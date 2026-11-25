@@ -128,6 +128,7 @@ extern "C" NTSTATUS DriverEntry(_In_ DRIVER_OBJECT *pDriverObject, _In_ UNICODE_
     InitialData.DxgkDdiDestroyContext = VioGpu3dDestroyContext;
 
     InitialData.DxgkDdiQueryVidPnHWCapability = VioGpu3dQueryVidPnHWCapability;
+    InitialData.DxgkDdiQueryDependentEngineGroup = VioGpu3dQueryDependentEngineGroup;
     InitialData.DxgkDdiQueryEngineStatus = VioGpu3dQueryEngineStatus;
     InitialData.DxgkDdiResetEngine = VioGpu3dResetEngine;
     InitialData.DxgkDdiStopDeviceAndReleasePostDisplayOwnership = VioGpu3dStopDeviceAndReleasePostDisplayOwnership;
@@ -640,6 +641,14 @@ NTSTATUS APIENTRY VioGpu3dStopDeviceAndReleasePostDisplayOwnership(_In_ VOID *pD
 {
     PAGED_CODE();
     return Adapter(pDeviceContext)->StopDeviceAndReleasePostDisplayOwnership(TargetId, pDisplayInfo);
+}
+
+NTSTATUS APIENTRY
+VioGpu3dQueryDependentEngineGroup(_In_ CONST HANDLE hAdapter,
+                                  _Inout_ DXGKARG_QUERYDEPENDENTENGINEGROUP *pQueryDependentEngineGroup)
+{
+    PAGED_CODE();
+    return Adapter(hAdapter)->QueryDependentEngineGroup(pQueryDependentEngineGroup);
 }
 
 NTSTATUS APIENTRY VioGpu3dQueryEngineStatus(_In_ CONST HANDLE hAdapter,

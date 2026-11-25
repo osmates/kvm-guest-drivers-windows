@@ -123,6 +123,7 @@ VioGpu3dAdapter::VioGpu3dAdapter(_In_ DEVICE_OBJECT *pPhysicalDeviceObject)
         m_Nodes[node].LastCompleted = 0;
         m_Nodes[node].PreemptRequested = FALSE;
         m_Nodes[node].PreemptionFenceId = 0;
+        m_Nodes[node].QueriedCompleted = 0;
     }
     InitializeListHead(&m_EscapeFences);
     m_EscapeFenceCount = 0;
@@ -570,6 +571,8 @@ NTSTATUS VioGpu3dAdapter::QueryAdapterInfo(_In_ CONST DXGKARG_QUERYADAPTERINFO *
                 pCaps->PresentationCaps.NoOverlapScreenBlt = 1;
                 pCaps->SupportNonVGA = IsVgaDevice();
                 pCaps->SupportSmoothRotation = FALSE;
+                // A timeout resets its node alone: devices with no DMA buffer on that node keep running.
+                pCaps->SupportPerEngineTDR = TRUE;
                 return STATUS_SUCCESS;
             }
         case DXGKQAITYPE_QUERYSEGMENT4:
@@ -1395,11 +1398,14 @@ void VioGpu3dAdapter::ConfigChanged(void)
     }
 }
 
-NTSTATUS VioGpu3dAdapter::QueryEngineStatus(_Inout_ DXGKARG_QUERYENGINESTATUS *pQueryEngineStatus)
+// Nodes share no state a reset touches, so each is its own group.
+NTSTATUS
+VioGpu3dAdapter::QueryDependentEngineGroup(_Inout_ DXGKARG_QUERYDEPENDENTENGINEGROUP *pQueryDependentEngineGroup)
 {
     PAGED_CODE();
 
-    pQueryEngineStatus->EngineStatus.Responsive = 1;
+    UINT node = pQueryDependentEngineGroup->NodeOrdinal;
+    pQueryDependentEngineGroup->DependentNodeOrdinalMask = node < VIOGPU3D_NODE_COUNT ? 1ull << node : 0;
     return STATUS_SUCCESS;
 }
 
@@ -1430,33 +1436,82 @@ NTSTATUS VioGpu3dAdapter::QueryCurrentFence(_Inout_ DXGKARG_QUERYCURRENTFENCE *p
     return STATUS_SUCCESS;
 }
 
-// Not paged: it holds m_NodeLock.
-NTSTATUS VioGpu3dAdapter::ResetEngine(_Inout_ DXGKARG_RESETENGINE *pResetEngine)
+// Not paged: it holds m_NodeLock. A node makes progress while it has nothing pending or completed a DMA buffer since
+// the last query.
+NTSTATUS VioGpu3dAdapter::QueryEngineStatus(_Inout_ DXGKARG_QUERYENGINESTATUS *pQueryEngineStatus)
 {
-    if (pResetEngine->NodeOrdinal >= VIOGPU3D_NODE_COUNT)
+    UINT node = pQueryEngineStatus->NodeOrdinal;
+    if (node >= VIOGPU3D_NODE_COUNT)
     {
         return STATUS_INVALID_PARAMETER;
     }
-    // The host runs what it was given; this engine's waits are given up, and their fences reported done.
     KIRQL irql;
     KeAcquireSpinLock(&m_NodeLock, &irql);
-    VIOGPU3D_NODE_STATE *pNode = &m_Nodes[pResetEngine->NodeOrdinal];
+    VIOGPU3D_NODE_STATE *pNode = &m_Nodes[node];
+    BOOLEAN responsive = IsListEmpty(&pNode->Pending) || pNode->LastCompleted != pNode->QueriedCompleted;
+    pNode->QueriedCompleted = pNode->LastCompleted;
+    UINT lastCompleted = pNode->LastCompleted;
+    UINT lastSubmitted = pNode->LastSubmitted;
+    KeReleaseSpinLock(&m_NodeLock, irql);
+    pQueryEngineStatus->EngineStatus.Value = 0;
+    pQueryEngineStatus->EngineStatus.Responsive = responsive ? 1 : 0;
+    if (!responsive)
+    {
+        DbgPrint(TRACE_LEVEL_WARNING,
+                 ("node %u made no progress: fence %u completed, %u submitted\n", node, lastCompleted, lastSubmitted));
+    }
+    return STATUS_SUCCESS;
+}
+
+// Not paged: it holds m_NodeLock. The host already has every command of the node's DMA buffers, so none may run
+// again: all of them are aborted, and the last of them is the last aborted fence.
+NTSTATUS VioGpu3dAdapter::ResetEngine(_Inout_ DXGKARG_RESETENGINE *pResetEngine)
+{
+    UINT node = pResetEngine->NodeOrdinal;
+    if (node >= VIOGPU3D_NODE_COUNT)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+    LIST_ENTRY dropped;
+    TakeNodePresentWork(node, &dropped);
+    UINT aborted = 0;
+    KIRQL irql;
+    KeAcquireSpinLock(&m_NodeLock, &irql);
+    VIOGPU3D_NODE_STATE *pNode = &m_Nodes[node];
+    UINT completedBefore = pNode->LastCompleted;
     while (!IsListEmpty(&pNode->Pending))
     {
         VIOGPU3D_DMA *pDma = CONTAINING_RECORD(RemoveHeadList(&pNode->Pending), VIOGPU3D_DMA, Link);
         pNode->LastCompleted = pDma->FenceId;
+        aborted++;
         if (pDma->Outstanding == 0)
         {
             delete pDma;
         }
         else
         {
-            // Its last release frees it.
+            // Its last release frees it, with no completion reported.
             pDma->Done = TRUE;
         }
     }
+    pNode->PreemptRequested = FALSE;
+    pNode->QueriedCompleted = pNode->LastCompleted;
     pResetEngine->LastAbortedFenceId = pNode->LastCompleted;
     KeReleaseSpinLock(&m_NodeLock, irql);
+    while (!IsListEmpty(&dropped))
+    {
+        VIOGPU3D_PRESENT_WORK *pWork = CONTAINING_RECORD(RemoveHeadList(&dropped), VIOGPU3D_PRESENT_WORK, Link);
+        EndDma(pWork->Dma);
+        delete[] (PUCHAR)pWork;
+    }
+    // dxgkrnl may free the aborted buffers' allocations once this returns, so no copy may still run.
+    KeWaitForSingleObject(&m_PresentIdle, Executive, KernelMode, FALSE, NULL);
+    DbgPrint(TRACE_LEVEL_ERROR,
+             ("engine reset on node %u: %u DMA buffers aborted after fence %u, last aborted fence %u\n",
+              node,
+              aborted,
+              completedBefore,
+              pResetEngine->LastAbortedFenceId));
     return STATUS_SUCCESS;
 }
 
@@ -1786,6 +1841,26 @@ VIOGPU3D_PRESENT_WORK *VioGpu3dAdapter::TakePresentWork(BOOLEAN run)
     }
     KeReleaseSpinLock(&m_PresentLock, irql);
     return pWork;
+}
+
+// The queued blts and fills of a node's DMA buffers, taken off the work thread's list.
+void VioGpu3dAdapter::TakeNodePresentWork(UINT node, _Out_ PLIST_ENTRY pList)
+{
+    InitializeListHead(pList);
+    KIRQL irql;
+    KeAcquireSpinLock(&m_PresentLock, &irql);
+    PLIST_ENTRY p = m_PresentWork.Flink;
+    while (p != &m_PresentWork)
+    {
+        VIOGPU3D_PRESENT_WORK *pWork = CONTAINING_RECORD(p, VIOGPU3D_PRESENT_WORK, Link);
+        p = p->Flink;
+        if (pWork->Dma->Node == node)
+        {
+            RemoveEntryList(&pWork->Link);
+            InsertTailList(pList, &pWork->Link);
+        }
+    }
+    KeReleaseSpinLock(&m_PresentLock, irql);
 }
 
 // Only between DMA buffers: what the host was given runs to its end, and the preemption is reported once the node
